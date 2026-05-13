@@ -109,7 +109,17 @@ type GoSdk {
   """
   pub workspaceModuleSource(ws: Workspace!, path: String! = "."): ModuleSource! {
     let selected = mod(ws, path)
-    let include = container
+    ws
+      .directory("/", include: workspaceModuleSourceInclude(ws, selected.path))
+      .asModuleSource(sourceRootPath: selected.path)
+  }
+
+  """
+  Workspace-root include patterns needed to load a module source and its local
+  module source references.
+  """
+  pub workspaceModuleSourceInclude(ws: Workspace!, path: String!): [String!]! {
+    container
       .from("python:3.13-alpine")
       .withDirectory("/ws", ws.directory("/", include: ["**/dagger.json"]))
       .withNewFile(
@@ -206,14 +216,10 @@ add_module(sys.argv[1])
 print("\n".join(sorted(include)))
 """,
       )
-      .withExec(["python3", "/includes.py", selected.path])
+      .withExec(["python3", "/includes.py", path])
       .stdout
       .split("\n")
       .filter { path => path != "" }
-
-    ws
-      .directory("/", include: include)
-      .asModuleSource(sourceRootPath: selected.path)
   }
 
   """
@@ -237,8 +243,28 @@ type Mod {
   Generate this module.
   """
   pub generate(ws: Workspace!): Changeset! {
-    GoSdk()
-      .workspaceModuleSource(ws, path)
-      .generatedContextChangeset
+    # Work around https://github.com/dagger/dagger/issues/13139.
+    #
+    # Calling Directory.asModuleSource directly from a module creates a DIR_SOURCE
+    # whose local dependency resolution tries to load user defaults from the module
+    # client context. That context has no caller host cwd/session, so
+    # Host.findUp(".env") can time out. Running the call in a nested Dagger client
+    # keeps the workspace client context intact. Once core gives DIR_SOURCE a
+    # correct caller/workspace context for user-default loading, this helper can be
+    # deleted and GoSdk().workspaceModuleSource(...).generatedContextChangeset
+    # restored.
+    let out = container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
+      .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
+      .withEnvVariable("DAGGER_GO_SDK_INCLUDE", toJSON(GoSdk().workspaceModuleSourceInclude(ws, path)))
+      .withExec(["workspace-module-source", path, "/before", "/after"], experimentalPrivilegedNesting: true)
+
+    out.directory("/after").changes(out.directory("/before"))
   }
 }

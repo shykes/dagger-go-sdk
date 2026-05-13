@@ -3,6 +3,11 @@ A Dagger module for Go SDK modules.
 """
 type GoSdk {
   """
+  Marker filename that skips generate when found at or above a Go SDK module root.
+  """
+  pub skipGenerateFilename: String! = ".dagger-go-sdk-skip-generate"
+
+  """
   Return every Dagger module whose sdk.source is "go".
   """
   pub modules(ws: Workspace!): [Mod!]! {
@@ -59,7 +64,10 @@ type GoSdk {
       path.trimPrefix("/")
     }
 
-    Mod(path: modPath)
+    Mod(
+      path: modPath,
+      skipGenerateFilename: skipGenerateFilename,
+    )
   }
 
   """
@@ -129,10 +137,13 @@ type GoSdk {
 
   """
   Generate all discovered Go SDK modules.
+  Modules with the generate skip marker are skipped.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
     changeset.withChangesets(
-      modules(ws).map { mod => mod.generate(ws) },
+      modules(ws)
+        .filter { mod => mod.skipGenerate(ws) == false }
+        .map { mod => mod.generate(ws) },
     )
   }
 }
@@ -147,31 +158,56 @@ type Mod {
   pub path: String!
 
   """
+  Marker filename that skips generate when found at or above this module root.
+  """
+  let skipGenerateFilename: String!
+
+  """
+  Whether this module or an ancestor contains the configured generate skip marker.
+  """
+  pub skipGenerate(ws: Workspace!): Boolean! {
+    hasMarker(ws, skipGenerateFilename)
+  }
+
+  """
+  Whether this module root or an ancestor contains a marker filename.
+  """
+  let hasMarker(ws: Workspace!, filename: String!): Boolean! {
+    let markerPath = ws.findUp(name: filename, from: path)
+    markerPath != null
+  }
+
+  """
   Generate this module.
+  If the generate skip marker is present, the changeset is empty.
   """
   pub generate(ws: Workspace!): Changeset! {
-    # Work around https://github.com/dagger/dagger/issues/13139.
-    #
-    # Calling Directory.asModuleSource directly from a module creates a DIR_SOURCE
-    # whose local dependency resolution tries to load user defaults from the module
-    # client context. That context has no caller host cwd/session, so
-    # Host.findUp(".env") can time out. Running the call in a nested Dagger client
-    # keeps the workspace client context intact. Once core gives DIR_SOURCE a
-    # correct caller/workspace context for user-default loading, this helper can be
-    # deleted and GoSdk().workspaceModuleSource(...).generatedContextChangeset
-    # restored.
-    let out = container
-      .from("golang:1.25-alpine")
-      .withoutEntrypoint
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
-      .withWorkdir("/helper")
-      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
-      .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
-      .withEnvVariable("DAGGER_GO_SDK_INCLUDE", toJSON(GoSdk().workspaceModuleSourceInclude(ws, path)))
-      .withExec(["workspace-module-source", "generate", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
+    if (skipGenerate(ws)) {
+      directory.changes(directory)
+    } else {
+      # Work around https://github.com/dagger/dagger/issues/13139.
+      #
+      # Calling Directory.asModuleSource directly from a module creates a DIR_SOURCE
+      # whose local dependency resolution tries to load user defaults from the module
+      # client context. That context has no caller host cwd/session, so
+      # Host.findUp(".env") can time out. Running the call in a nested Dagger client
+      # keeps the workspace client context intact. Once core gives DIR_SOURCE a
+      # correct caller/workspace context for user-default loading, this helper can be
+      # deleted and GoSdk().workspaceModuleSource(...).generatedContextChangeset
+      # restored.
+      let out = container
+        .from("golang:1.25-alpine")
+        .withoutEntrypoint
+        .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+        .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+        .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+        .withWorkdir("/helper")
+        .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
+        .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
+        .withEnvVariable("DAGGER_GO_SDK_INCLUDE", toJSON(GoSdk().workspaceModuleSourceInclude(ws, path)))
+        .withExec(["workspace-module-source", "generate", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
-    out.directory("/after").changes(out.directory("/before"))
+      out.directory("/after").changes(out.directory("/before"))
+    }
   }
 }

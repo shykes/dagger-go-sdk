@@ -22,8 +22,8 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	if len(os.Args) != 4 {
-		return fmt.Errorf("usage: workspace-module-source SOURCE_ROOT_PATH BEFORE_DIR AFTER_DIR")
+	if len(os.Args) != 5 {
+		return fmt.Errorf("usage: workspace-module-source SOURCE_ROOT_PATH CHANGESET_ROOT_PATH BEFORE_DIR AFTER_DIR")
 	}
 
 	workspaceID, err := envString(workspaceIDEnv)
@@ -48,11 +48,11 @@ func run(ctx context.Context) error {
 		AsModuleSource(dagger.DirectoryAsModuleSourceOpts{SourceRootPath: os.Args[1]}).
 		GeneratedContextChangeset()
 
-	sourceRootPath := os.Args[1]
-	if _, err := changes.Before().Directory(sourceRootPath).Export(ctx, os.Args[2]); err != nil {
+	changesetRootPath := os.Args[2]
+	if _, err := changes.Before().Directory(changesetRootPath).Export(ctx, os.Args[3]); err != nil {
 		return err
 	}
-	if _, err := changes.After().Directory(sourceRootPath).Export(ctx, os.Args[3]); err != nil {
+	if _, err := changes.After().Directory(changesetRootPath).Export(ctx, os.Args[4]); err != nil {
 		return err
 	}
 	return nil

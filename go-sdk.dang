@@ -263,7 +263,7 @@ type Mod {
       .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
       .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
       .withEnvVariable("DAGGER_GO_SDK_INCLUDE", toJSON(GoSdk().workspaceModuleSourceInclude(ws, path)))
-      .withExec(["workspace-module-source", path, "/before", "/after"], experimentalPrivilegedNesting: true)
+      .withExec(["workspace-module-source", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
     out.directory("/after").changes(out.directory("/before"))
   }

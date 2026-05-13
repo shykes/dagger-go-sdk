@@ -96,7 +96,7 @@ func runInit(ctx context.Context, client *dagger.Client, workspaceID string, arg
 
 	existing := client.
 		LoadWorkspaceFromID(dagger.WorkspaceID(workspaceID)).
-		Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{path.Join(modulePath, "dagger.json")}})
+		Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{path.Join(modulePath, "*")}})
 	exists, err := existing.Exists(ctx, path.Join(modulePath, "dagger.json"))
 	if err != nil {
 		return err

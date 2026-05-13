@@ -17,7 +17,7 @@ type GoSdk {
       )
       .{filePath}
       .map { configPath =>
-        module(
+        mod(
           ws,
           if (configPath.filePath == "dagger.json") { "." } else { configPath.filePath.trimSuffix("/dagger.json") },
           findUp: false,
@@ -28,7 +28,7 @@ type GoSdk {
   """
   Return the Go SDK module containing a workspace path.
   """
-  pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): Mod! {
+  pub mod(ws: Workspace!, path: String! = ".", findUp: Boolean! = true): Mod! {
     let modPath = if (findUp) {
       let foundConfigPath = ws.findUp("dagger.json", path)
       if (foundConfigPath == null) {

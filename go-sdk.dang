@@ -85,22 +85,20 @@ type GoSdk {
       path
     }
 
-    let src = moduleSource(
-      modPath,
-      disableFindUp: true,
-      allowNotExists: true,
-      requireKind: ModuleSourceKind.LOCAL_SOURCE,
-    )
+    # Work around https://github.com/dagger/dagger/issues/13139 and keep the
+    # returned changeset rooted at the caller's workspace path.
+    let out = container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
+      .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
+      .withExec(["workspace-module-source", "init", modPath, ws.path, name, "/before", "/after"], experimentalPrivilegedNesting: true)
 
-    if (src.configExists) {
-      raise "module already exists: " + modPath
-    }
-
-    src
-      .withName(name)
-      .withSDK("go")
-      .withEngineVersion("latest")
-      .generatedContextChangeset
+    out.directory("/after").changes(out.directory("/before"))
   }
 
   """
@@ -263,7 +261,7 @@ type Mod {
       .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
       .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
       .withEnvVariable("DAGGER_GO_SDK_INCLUDE", toJSON(GoSdk().workspaceModuleSourceInclude(ws, path)))
-      .withExec(["workspace-module-source", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
+      .withExec(["workspace-module-source", "generate", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
     out.directory("/after").changes(out.directory("/before"))
   }

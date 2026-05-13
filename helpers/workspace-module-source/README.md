@@ -1,6 +1,6 @@
 # workspace-module-source
 
-Temporary helper for `Mod.generate`.
+Temporary helper for `init` and `Mod.generate`.
 
 It runs `Workspace.directory(...).asModuleSource(...)` from a nested Dagger
 client instead of from the Dang module client. This avoids
@@ -13,6 +13,11 @@ caller's `Workspace.path`, not always at the target module root. Returned
 changesets are applied by the CLI relative to that caller path, so this keeps
 paths correct whether the caller runs from the module directory or from a parent
 workspace.
+
+For `init`, the helper builds an add-only diff itself: empty before directory,
+generated module context inserted at the module path relative to
+`Workspace.path`. That avoids both the module-context local source timeout and
+the module-rooted changeset shape.
 
 When core gives `DIR_SOURCE` a valid caller/workspace context for user-default
 loading, delete this helper and restore the direct Dang generate path:

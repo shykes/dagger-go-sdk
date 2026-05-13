@@ -131,7 +131,9 @@ type GoSdk {
   Generate all discovered Go SDK modules.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
-    changeset
+    changeset.withChangesets(
+      modules(ws).map { mod => mod.generate(ws) },
+    )
   }
 }
 

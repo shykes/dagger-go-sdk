@@ -126,7 +126,7 @@ func runGenerate(ctx context.Context, client *dagger.Client, args []string) erro
 			LoadDirectoryFromID(dagger.DirectoryID(seedDirectoryID)).
 			AsModuleSource(dagger.DirectoryAsModuleSourceOpts{SourceRootPath: sourceRootPath}).
 			GeneratedContextChangeset()
-		if _, err := client.Directory().Export(ctx, rest[2]); err != nil {
+		if err := os.MkdirAll(rest[2], 0o755); err != nil {
 			return err
 		}
 		if _, err := directoryAt(changes.After(), changesetRootPath).Export(ctx, rest[3]); err != nil {

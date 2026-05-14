@@ -1,0 +1,48 @@
+"""
+End-to-end checks for the Go SDK toolchain module.
+"""
+type E2e {
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) {
+      raise message
+    }
+    null
+  }
+
+  let containsPath(paths: [String!]!, want: String!): Boolean! {
+    paths
+      .filter { path => path == want }
+      .length > 0
+  }
+
+  """
+  Initializing a Go SDK module at an explicit path should work when the target
+  directory does not exist yet.
+  """
+  pub initPathCheck(ws: Workspace!): Void @check {
+    let changes = goSdk.init(ws, name: "testsdk", path: "./foo")
+
+    assert(
+      containsPath(changes.addedPaths, "foo/dagger.json"),
+      "init changeset did not include foo/dagger.json",
+    )
+    assert(
+      containsPath(changes.addedPaths, "foo/main.go"),
+      "init changeset did not include foo/main.go",
+    )
+    assert(
+      changes.modifiedPaths.length == 0,
+      "init changeset unexpectedly modified existing files",
+    )
+    assert(
+      changes.removedPaths.length == 0,
+      "init changeset unexpectedly removed files",
+    )
+    assert(
+      changes.layer.file("foo/dagger.json").contents.contains("\"name\": \"testsdk\""),
+      "generated dagger.json did not contain module name",
+    )
+
+    null
+  }
+}

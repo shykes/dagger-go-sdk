@@ -51,9 +51,9 @@ Generates a module source and exports `changes.before.directory(CHANGESET_ROOT)`
 and `changes.after.directory(CHANGESET_ROOT)` to the given local paths.
 
 When `SEED_DIRECTORY_ID` is set, `REF` is the seed source root path and the
-before directory is exported from an empty directory. This avoids mounting the
-seed into the helper container and fixes the empty-result mount failure seen by
-`init --path`.
+before directory is created directly on the helper filesystem instead of
+exporting an empty Dagger directory. This avoids mounting the seed into the
+helper container and fixes the empty-result mount failure seen by `init --path`.
 
 ```sh
 module-source deps-add TARGET_REF DEP_REF CHANGESET_ROOT BEFORE_DIR AFTER_DIR [--name NAME]

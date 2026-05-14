@@ -296,7 +296,10 @@ type Mod {
   Manage this module's Dagger dependencies.
   """
   pub deps: ModDeps! {
-    ModDeps(path: path)
+    ModDeps(
+      path: path,
+      daggerJSON: daggerJSON,
+    )
   }
 
   """
@@ -433,6 +436,11 @@ type ModDeps {
   """
   let path: String!
 
+  """
+  This module's dagger.json.
+  """
+  let daggerJSON: File!
+
   let moduleSourceHelper(ws: Workspace!): Container! {
     container
       .from("golang:1.25-alpine")
@@ -445,6 +453,23 @@ type ModDeps {
       .withWorkdir("/helper")
       .withExec(["go", "build", "-o", "/usr/local/bin/module-source", "."])
       .withEnvVariable("WORKSPACE_ID", toJSON(ws.id))
+  }
+
+  """
+  Return a list of the module's dependencies
+  """
+  pub list: [String!]! {
+    container
+      .from("python:3.13-alpine")
+      .withFile("/dagger.json", daggerJSON)
+      .withExec([
+        "python3",
+        "-c",
+        "import json\nwith open('/dagger.json') as f:\n    config = json.load(f)\nfor dep in config.get('dependencies') or []:\n    if isinstance(dep, str):\n        print(dep)\n    elif isinstance(dep, dict):\n        print(dep.get('name') or dep.get('source') or '')\n",
+      ])
+      .stdout
+      .split("\n")
+      .filter { dep => dep != "" }
   }
 
   """

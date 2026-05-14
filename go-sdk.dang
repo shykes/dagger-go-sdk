@@ -113,8 +113,11 @@ type GoSdk {
 
   Pass `template` to materialize files from templates/<template> before
   generation. The empty default uses this module's minimal template.
+
+  By default, generated SDK files are checked into version control. Pass
+  `ignoreGenerated` to add generated SDK paths to .gitignore instead.
   """
-  pub init(ws: Workspace!, name: String!, path: String! = "", template: String! = "", generate: Boolean! = true): Changeset! {
+  pub init(ws: Workspace!, name: String!, path: String! = "", template: String! = "", generate: Boolean! = true, ignoreGenerated: Boolean! = false): Changeset! {
     let rawPath = if (path == "") {
       let daggerDir = ws.findUp(".dagger", ".")
       if (daggerDir == null) {
@@ -155,7 +158,7 @@ type GoSdk {
     } else if (currentModule.source.exists("templates/" + selectedTemplate) == false) {
       raise "unknown init template: " + template
     } else {
-      let config = "{\n  \"name\": " + toJSON(name) + ",\n  \"engineVersion\": \"latest\",\n  \"sdk\": {\n    \"source\": \"go\"\n  }\n}\n"
+      let config = "{\n  \"name\": " + toJSON(name) + ",\n  \"engineVersion\": \"latest\",\n  \"sdk\": {\n    \"source\": \"go\"\n  },\n  \"codegen\": {\n    \"automaticGitignore\": " + toJSON(ignoreGenerated) + "\n  }\n}\n"
       let templateSource = if (selectedTemplate == "legacy") {
         renderedLegacyTemplate(name)
       } else {

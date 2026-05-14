@@ -170,6 +170,13 @@ type Mod {
   }
 
   """
+  Manage this module's Dagger dependencies.
+  """
+  pub deps: ModDeps! {
+    ModDeps(path: path)
+  }
+
+  """
   Whether this module root or an ancestor contains a marker filename.
   """
   let hasMarker(ws: Workspace!, filename: String!): Boolean! {
@@ -209,5 +216,75 @@ type Mod {
 
       out.directory("/after").changes(out.directory("/before"))
     }
+  }
+}
+
+"""
+Dagger dependencies for a Go SDK module.
+"""
+type ModDeps {
+  """
+  Workspace-relative path of the module root.
+  """
+  let path: String!
+
+  """
+  Add a Dagger dependency to this module.
+  """
+  pub add(ws: Workspace!, source: String!, name: String! = ""): Changeset! {
+    let out = container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
+      .withDirectory("/ws", ws.directory("/", exclude: [".git", ".git/**"]))
+      .withNewFile("/ws/.git/HEAD", "ref: refs/heads/main\n")
+      .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
+      .withExec(["workspace-module-source", "deps-add", path, ws.path, source, name, "/before", "/after"], experimentalPrivilegedNesting: true)
+
+    out.directory("/after").changes(out.directory("/before"))
+  }
+
+  """
+  Remove a Dagger dependency from this module by name or source.
+  """
+  pub remove(ws: Workspace!, name: String!): Changeset! {
+    let out = container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
+      .withDirectory("/ws", ws.directory("/", exclude: [".git", ".git/**"]))
+      .withNewFile("/ws/.git/HEAD", "ref: refs/heads/main\n")
+      .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
+      .withExec(["workspace-module-source", "deps-remove", path, ws.path, name, "/before", "/after"], experimentalPrivilegedNesting: true)
+
+    out.directory("/after").changes(out.directory("/before"))
+  }
+
+  """
+  Update one Dagger dependency by name or source, or all remote dependencies.
+  """
+  pub update(ws: Workspace!, name: String! = ""): Changeset! {
+    let out = container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
+      .withDirectory("/ws", ws.directory("/", exclude: [".git", ".git/**"]))
+      .withNewFile("/ws/.git/HEAD", "ref: refs/heads/main\n")
+      .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
+      .withExec(["workspace-module-source", "deps-update", path, ws.path, name, "/before", "/after"], experimentalPrivilegedNesting: true)
+
+    out.directory("/after").changes(out.directory("/before"))
   }
 }

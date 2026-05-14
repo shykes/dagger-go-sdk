@@ -1,6 +1,6 @@
 # workspace-module-source
 
-Temporary helper for `init` and `Mod.generate`.
+Temporary helper for `init`, `Mod.generate`, and `Mod.deps`.
 
 It runs `Workspace.directory(...).asModuleSource(...)` from a nested Dagger
 client instead of from the Dang module client. This avoids

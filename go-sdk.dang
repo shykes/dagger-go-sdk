@@ -64,8 +64,12 @@ type GoSdk {
       path.trimPrefix("/")
     }
 
+    let configPath = if (modPath == ".") { "dagger.json" } else { modPath + "/dagger.json" }
+
     Mod(
       path: modPath,
+      workspacePath: ws.path,
+      daggerJSON: ws.directory("/", include: [configPath]).file(configPath),
       skipGenerateFilename: skipGenerateFilename,
     )
   }
@@ -158,6 +162,16 @@ type Mod {
   pub path: String!
 
   """
+  Workspace-relative path where changesets should be rooted.
+  """
+  let workspacePath: String!
+
+  """
+  This module's dagger.json.
+  """
+  let daggerJSON: File!
+
+  """
   Marker filename that skips generate when found at or above this module root.
   """
   let skipGenerateFilename: String!
@@ -174,6 +188,17 @@ type Mod {
   """
   pub deps: ModDeps! {
     ModDeps(path: path)
+  }
+
+  """
+  Manage the Dagger engine version required by this module.
+  """
+  pub engine: ModEngine! {
+    ModEngine(
+      path: path,
+      workspacePath: workspacePath,
+      daggerJSON: daggerJSON,
+    )
   }
 
   """
@@ -215,6 +240,84 @@ type Mod {
         .withExec(["workspace-module-source", "generate", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
       out.directory("/after").changes(out.directory("/before"))
+    }
+  }
+}
+
+"""
+Required Dagger engine version for a Go SDK module.
+"""
+type ModEngine {
+  """
+  Workspace-relative path of the module root.
+  """
+  let path: String!
+
+  """
+  Workspace-relative path where changesets should be rooted.
+  """
+  let workspacePath: String!
+
+  """
+  This module's dagger.json.
+  """
+  let daggerJSON: File!
+
+  """
+  The Dagger engine version required by this module, without a leading "v".
+  """
+  pub required: String! {
+    daggerJSON.asJSON.field(["engineVersion"]).asString.trimPrefix("v")
+  }
+
+  """
+  Configure this module to require the given Dagger engine version.
+  """
+  pub require(version: String!): Changeset! {
+    let current = daggerJSON.asJSON.field(["engineVersion"]).asString
+    let required = normalizedVersion(version)
+    let before = directory.withFile(changesetPath, daggerJSON)
+    let after = directory.withFile(changesetPath, daggerJSON.withReplaced(toJSON(current), toJSON(required)))
+    after.changes(before)
+  }
+
+  """
+  Configure this module to require the current Dagger engine version.
+  """
+  pub requireCurrent: Changeset! {
+    require(version)
+  }
+
+  """
+  Configure this module to require the latest stable Dagger engine version.
+  """
+  pub requireLatest: Changeset! {
+    require("latest")
+  }
+
+  let changesetPath: String! {
+    let configPath = if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
+    if (workspacePath == ".") {
+      configPath
+    } else {
+      let relative = configPath.trimPrefix(workspacePath + "/")
+      if (relative == configPath) {
+        raise "module path " + path + " is outside changeset root " + workspacePath
+      } else {
+        relative
+      }
+    }
+  }
+
+  let normalizedVersion(version: String!): String! {
+    if (version == "") {
+      raise "version must not be empty"
+    } else if (version == "latest") {
+      version
+    } else if (version.trimPrefix("v") != version) {
+      version
+    } else {
+      "v" + version
     }
   }
 }

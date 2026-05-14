@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"text/template"
 
 	"dagger.io/dagger"
+	"github.com/iancoleman/strcase"
 )
 
 const (
@@ -25,12 +29,11 @@ func main() {
 
 func run(ctx context.Context) error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: workspace-module-source generate|init|deps-add|deps-remove|deps-update ...")
+		return fmt.Errorf("usage: workspace-module-source render-template|generate|init-generate|deps-add|deps-remove|deps-update ...")
 	}
 
-	workspaceID, err := envString(workspaceIDEnv)
-	if err != nil {
-		return err
+	if os.Args[1] == "render-template" {
+		return runRenderTemplate(os.Args[2:])
 	}
 
 	client, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
@@ -41,9 +44,13 @@ func run(ctx context.Context) error {
 
 	switch os.Args[1] {
 	case "generate":
+		workspaceID, err := envString(workspaceIDEnv)
+		if err != nil {
+			return err
+		}
 		return runGenerate(ctx, client, workspaceID, os.Args[2:])
-	case "init":
-		return runInit(ctx, client, workspaceID, os.Args[2:])
+	case "init-generate":
+		return runInitGenerate(ctx, client, os.Args[2:])
 	case "deps-add":
 		return runDepsAdd(ctx, client, os.Args[2:])
 	case "deps-remove":
@@ -81,57 +88,87 @@ func runGenerate(ctx context.Context, client *dagger.Client, workspaceID string,
 	return nil
 }
 
-func runInit(ctx context.Context, client *dagger.Client, workspaceID string, args []string) error {
-	if len(args) != 5 {
-		return fmt.Errorf("usage: workspace-module-source init MODULE_PATH CHANGESET_ROOT_PATH NAME BEFORE_DIR AFTER_DIR")
+func runInitGenerate(ctx context.Context, client *dagger.Client, args []string) error {
+	if len(args) != 3 {
+		return fmt.Errorf("usage: workspace-module-source init-generate SOURCE_ROOT_PATH BEFORE_DIR AFTER_DIR")
 	}
 
-	modulePath, err := clean(args[0])
-	if err != nil {
-		return err
-	}
-	changesetRootPath, err := clean(args[1])
-	if err != nil {
-		return err
-	}
-	name := args[2]
-	diffPath, err := childPath(changesetRootPath, modulePath)
+	sourceRootPath, err := clean(args[0])
 	if err != nil {
 		return err
 	}
 
-	existing := client.
-		LoadWorkspaceFromID(dagger.WorkspaceID(workspaceID)).
-		Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{path.Join(modulePath, "*")}})
-	exists, err := existing.Exists(ctx, path.Join(modulePath, "dagger.json"))
-	if err != nil {
+	changes := client.
+		Host().
+		Directory("/seed").
+		AsModuleSource(dagger.DirectoryAsModuleSourceOpts{SourceRootPath: sourceRootPath}).
+		GeneratedContextChangeset()
+
+	if _, err := client.Directory().Export(ctx, args[1]); err != nil {
 		return err
 	}
-	if exists {
-		return fmt.Errorf("module already exists: %s", modulePath)
-	}
-
-	source := client.
-		Directory().
-		WithNewFile(path.Join(modulePath, "dagger.json"), "{}").
-		AsModuleSource(dagger.DirectoryAsModuleSourceOpts{SourceRootPath: modulePath})
-
-	generated := source.
-		WithName(name).
-		WithSDK("go").
-		WithEngineVersion("latest").
-		GeneratedContextDirectory().
-		Directory(modulePath)
-
-	before := client.Directory()
-	after := before.WithDirectory(diffPath, generated)
-	if _, err := before.Export(ctx, args[3]); err != nil {
-		return err
-	}
-	if _, err := after.Export(ctx, args[4]); err != nil {
+	if _, err := changes.After().Export(ctx, args[2]); err != nil {
 		return err
 	}
 	return nil
+}
+
+func runRenderTemplate(args []string) error {
+	if len(args) != 3 {
+		return fmt.Errorf("usage: workspace-module-source render-template MODULE_NAME TEMPLATE_DIR OUT_DIR")
+	}
+
+	moduleName := args[0]
+	templateDir := args[1]
+	outDir := args[2]
+	data := map[string]string{
+		"ModuleName":   moduleName,
+		"ModuleType":   strcase.ToCamel(moduleName),
+		"ModuleImport": "dagger/" + strcase.ToKebab(moduleName),
+	}
+
+	return filepath.WalkDir(templateDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(templateDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+
+		dstRel := strings.TrimSuffix(rel, ".tmpl")
+		dst := filepath.Join(outDir, dstRel)
+		if entry.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("template symlinks are not supported: %s", rel)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !strings.HasSuffix(rel, ".tmpl") {
+			return os.WriteFile(dst, contents, 0o644)
+		}
+
+		var buf bytes.Buffer
+		tmpl, err := template.New(rel).Parse(string(contents))
+		if err != nil {
+			return err
+		}
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, buf.Bytes(), 0o644)
+	})
 }
 
 func runDepsAdd(ctx context.Context, client *dagger.Client, args []string) error {
@@ -280,20 +317,6 @@ func clean(p string) (string, error) {
 		return "", fmt.Errorf("path escapes workspace: %s", p)
 	}
 	return p, nil
-}
-
-func childPath(parent, child string) (string, error) {
-	if parent == "." {
-		return child, nil
-	}
-	if child == parent {
-		return ".", nil
-	}
-	prefix := parent + "/"
-	if strings.HasPrefix(child, prefix) {
-		return strings.TrimPrefix(child, prefix), nil
-	}
-	return "", fmt.Errorf("module path %q is outside changeset root %q", child, parent)
 }
 
 func envString(name string) (string, error) {

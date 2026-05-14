@@ -2,7 +2,10 @@ module workspace-module-source
 
 go 1.25.0
 
-require dagger.io/dagger v0.20.6
+require (
+	dagger.io/dagger v0.20.6
+	github.com/iancoleman/strcase v0.3.0
+)
 
 require (
 	github.com/99designs/gqlgen v0.17.89 // indirect

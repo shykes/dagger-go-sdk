@@ -118,12 +118,12 @@ type GoSdk {
     let rawPath = if (path == "") {
       let daggerDir = ws.findUp(".dagger", ".")
       if (daggerDir == null) {
-        raise "no .dagger directory found"
+        ".dagger/modules/" + name
       } else {
         daggerDir.trimPrefix("/") + "/modules/" + name
       }
     } else {
-      path.trimPrefix("/")
+      path.trimPrefix("./").trimPrefix("/")
     }
 
     let modPath = if (rawPath == "" or rawPath == ".") {
@@ -167,19 +167,9 @@ type GoSdk {
           .withNewFile(configChangesetPath, config)
 
       if (generate) {
-        # Work around https://github.com/dagger/dagger/issues/13139. Init
-        # still owns the seed files here; the helper only runs generation on
-        # that seeded directory from a nested client.
-        let out = container
-          .from("golang:1.25-alpine")
-          .withoutEntrypoint
-          .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-          .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-          .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
-          .withDirectory("/seed", seeded)
-          .withWorkdir("/helper")
-          .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
-          .withExec(["workspace-module-source", "init-generate", moduleChangesetPath, "/before", "/after"], experimentalPrivilegedNesting: true)
+        let out = moduleSourceHelper(ws)
+          .withEnvVariable("SEED_DIRECTORY_ID", toJSON(seeded.id))
+          .withExec(["module-source", "generate", "--local", moduleChangesetPath, ".", "/before", "/after"], experimentalPrivilegedNesting: true)
 
         out.directory("/after").changes(out.directory("/before"))
       } else {
@@ -197,9 +187,21 @@ type GoSdk {
       .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
       .withDirectory("/template", currentModule.source.directory("templates/legacy"))
       .withWorkdir("/helper")
-      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
-      .withExec(["workspace-module-source", "render-template", name, "/template", "/rendered"])
+      .withExec(["go", "build", "-o", "/usr/local/bin/module-source", "."])
+      .withExec(["module-source", "render-template", name, "/template", "/rendered"])
       .directory("/rendered")
+  }
+
+  let moduleSourceHelper(ws: Workspace!): Container! {
+    container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/module-source", "."])
+      .withEnvVariable("WORKSPACE_ID", toJSON(ws.id))
   }
 
   """
@@ -313,6 +315,18 @@ type Mod {
     markerPath != null
   }
 
+  let moduleSourceHelper(ws: Workspace!): Container! {
+    container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/module-source", "."])
+      .withEnvVariable("WORKSPACE_ID", toJSON(ws.id))
+  }
+
   """
   Generate this module.
   If the generate skip marker is present, the changeset is empty.
@@ -321,27 +335,8 @@ type Mod {
     if (skipGenerate(ws)) {
       directory.changes(directory)
     } else {
-      # Work around https://github.com/dagger/dagger/issues/13139.
-      #
-      # Calling Directory.asModuleSource directly from a module creates a DIR_SOURCE
-      # whose local dependency resolution tries to load user defaults from the module
-      # client context. That context has no caller host cwd/session, so
-      # Host.findUp(".env") can time out. Running the call in a nested Dagger client
-      # keeps the workspace client context intact. Once core gives DIR_SOURCE a
-      # correct caller/workspace context for user-default loading, this helper can be
-      # deleted and GoSdk().workspaceModuleSource(...).generatedContextChangeset
-      # restored.
-      let out = container
-        .from("golang:1.25-alpine")
-        .withoutEntrypoint
-        .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-        .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-        .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
-        .withWorkdir("/helper")
-        .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
-        .withEnvVariable("DAGGER_GO_SDK_WORKSPACE_ID", toJSON(ws.id))
-        .withEnvVariable("DAGGER_GO_SDK_INCLUDE", toJSON(GoSdk().workspaceModuleSourceInclude(ws, path)))
-        .withExec(["workspace-module-source", "generate", path, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
+      let out = moduleSourceHelper(ws)
+        .withExec(["module-source", "generate", "--cwd", ".", "--local", path, workspacePath, "/before", "/after"], experimentalPrivilegedNesting: true)
 
       out.directory("/after").changes(out.directory("/before"))
     }
@@ -435,21 +430,27 @@ type ModDeps {
   """
   let path: String!
 
-  """
-  Add a Dagger dependency to this module.
-  """
-  pub add(ws: Workspace!, source: String!, name: String! = ""): Changeset! {
-    let out = container
+  let moduleSourceHelper(ws: Workspace!): Container! {
+    container
       .from("golang:1.25-alpine")
       .withoutEntrypoint
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
-      .withWorkdir("/helper")
-      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
       .withDirectory("/ws", ws.directory("/", exclude: [".git", ".git/**"]))
       .withNewFile("/ws/.git/HEAD", "ref: refs/heads/main\n")
-      .withExec(["workspace-module-source", "deps-add", path, ws.path, source, name, "/before", "/after"], experimentalPrivilegedNesting: true)
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/module-source", "."])
+      .withEnvVariable("WORKSPACE_ID", toJSON(ws.id))
+  }
+
+  """
+  Add a Dagger dependency to this module.
+  """
+  pub add(ws: Workspace!, source: String!, name: String! = ""): Changeset! {
+    let nameFlags = if (name == "") { [] } else { ["--name", name] }
+    let out = moduleSourceHelper(ws)
+      .withExec(["module-source", "deps-add"] + nameFlags + [path, source, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
     out.directory("/after").changes(out.directory("/before"))
   }
@@ -458,17 +459,8 @@ type ModDeps {
   Remove a Dagger dependency from this module by name or source.
   """
   pub remove(ws: Workspace!, name: String!): Changeset! {
-    let out = container
-      .from("golang:1.25-alpine")
-      .withoutEntrypoint
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
-      .withWorkdir("/helper")
-      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
-      .withDirectory("/ws", ws.directory("/", exclude: [".git", ".git/**"]))
-      .withNewFile("/ws/.git/HEAD", "ref: refs/heads/main\n")
-      .withExec(["workspace-module-source", "deps-remove", path, ws.path, name, "/before", "/after"], experimentalPrivilegedNesting: true)
+    let out = moduleSourceHelper(ws)
+      .withExec(["module-source", "deps-remove", path, name, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
     out.directory("/after").changes(out.directory("/before"))
   }
@@ -477,17 +469,8 @@ type ModDeps {
   Update one Dagger dependency by name or source, or all remote dependencies.
   """
   pub update(ws: Workspace!, name: String! = ""): Changeset! {
-    let out = container
-      .from("golang:1.25-alpine")
-      .withoutEntrypoint
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withDirectory("/helper", currentModule.source.directory("helpers/workspace-module-source"))
-      .withWorkdir("/helper")
-      .withExec(["go", "build", "-o", "/usr/local/bin/workspace-module-source", "."])
-      .withDirectory("/ws", ws.directory("/", exclude: [".git", ".git/**"]))
-      .withNewFile("/ws/.git/HEAD", "ref: refs/heads/main\n")
-      .withExec(["workspace-module-source", "deps-update", path, ws.path, name, "/before", "/after"], experimentalPrivilegedNesting: true)
+    let out = moduleSourceHelper(ws)
+      .withExec(["module-source", "deps-update", path, name, ws.path, "/before", "/after"], experimentalPrivilegedNesting: true)
 
     out.directory("/after").changes(out.directory("/before"))
   }

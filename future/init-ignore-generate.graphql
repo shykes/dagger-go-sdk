@@ -1,0 +1,40 @@
+# Go SDK init generated-file policy
+#
+# What:
+#   Add an init argument that decides whether generated SDK files should be
+#   ignored by version control.
+#
+# Why:
+#   Go SDK modules should check generated files in by default. The current
+#   engine default is the opposite: when codegen.automaticGitignore is omitted,
+#   Dagger writes SDK-provided generated paths to .gitignore.
+#
+# How:
+#   init writes codegen.automaticGitignore explicitly into dagger.json every
+#   time. This makes the module policy stable and visible, and leaves room for
+#   the engine's implicit default to change later without changing modules that
+#   already declared their intent.
+
+extend type GoSdk {
+  """
+  Extend init with generated-file version-control policy.
+
+  Existing init arguments are unchanged and intentionally omitted here.
+
+  By default, generated SDK files are checked into version control. Set
+  ignoreGenerated to true to preserve the engine-style behavior of adding
+  generated SDK paths to .gitignore.
+  """
+  init(
+    """
+    Whether generated SDK files should be added to .gitignore.
+
+    false writes codegen.automaticGitignore=false, so generated files are
+    checked in by default.
+
+    true writes codegen.automaticGitignore=true, so Dagger automatically writes
+    SDK-provided ignored paths to .gitignore.
+    """
+    ignoreGenerated: Boolean = false
+  ): Changeset!
+}

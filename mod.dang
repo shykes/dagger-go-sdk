@@ -1,0 +1,76 @@
+"""
+A Dagger module that uses the Go SDK.
+"""
+type Mod {
+  """
+  Workspace-relative path of this module root.
+  """
+  pub path: String!
+
+  """
+  Workspace-relative path where changesets should be rooted.
+  """
+  let workspacePath: String!
+
+  """
+  This module's dagger.json.
+  """
+  let daggerJSON: File!
+
+  """
+  Marker filename that skips generate when found at or above this module root.
+  """
+  let skipGenerateFilename: String!
+
+  """
+  Whether this module or an ancestor contains the configured generate skip marker.
+  """
+  pub skipGenerate(ws: Workspace!): Boolean! {
+    hasMarker(ws, skipGenerateFilename)
+  }
+
+  """
+  Manage this module's Dagger dependencies.
+  """
+  pub deps: ModDeps! {
+    ModDeps(
+      path: path,
+      workspacePath: workspacePath,
+      daggerJSON: daggerJSON,
+    )
+  }
+
+  """
+  Manage the Dagger engine version required by this module.
+  """
+  pub engine: ModEngine! {
+    ModEngine(
+      path: path,
+      workspacePath: workspacePath,
+      daggerJSON: daggerJSON,
+    )
+  }
+
+  """
+  Whether this module root or an ancestor contains a marker filename.
+  """
+  let hasMarker(ws: Workspace!, filename: String!): Boolean! {
+    let markerPath = ws.findUp(name: filename, from: path)
+    markerPath != null
+  }
+
+  """
+  Generate this module.
+  If the generate skip marker is present, the changeset is empty.
+  """
+  pub generate(ws: Workspace!): Changeset! {
+    if (skipGenerate(ws)) {
+      directory.changes(directory)
+    } else {
+      let sourceID = DaggerQueryHelpers().moduleSourceID(ws, path, cwd: ".", local: true)
+      let query = DaggerQueryHelpers().moduleSourceChangeset(sourceID, workspacePath)
+
+      query.outputDir("/after").changes(query.outputDir("/before"))
+    }
+  }
+}

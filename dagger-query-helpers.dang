@@ -1,0 +1,113 @@
+"""
+Internal helpers for building source IDs and running checked-in queries.
+"""
+type DaggerQueryHelpers {
+  """
+  Build a nested query without mounting an input directory.
+  """
+  let nestedDaggerQuery(name: String!, varsJSON: String!): NestedDaggerQuery! {
+    NestedDaggerQuery(
+      name: name,
+      varsJSON: varsJSON,
+      mountedDirectoryPath: "",
+      mountedDirectory: directory,
+    )
+  }
+
+  """
+  Build a nested query with one input directory mounted into the helper.
+  """
+  let nestedDaggerQueryWithDirectory(
+    name: String!,
+    varsJSON: String!,
+    path: String!,
+    source: Directory!,
+  ): NestedDaggerQuery! {
+    NestedDaggerQuery(
+      name: name,
+      varsJSON: varsJSON,
+      mountedDirectoryPath: path,
+      mountedDirectory: source,
+    )
+  }
+
+  """
+  Return a ModuleSourceID for a workspace path or remote module reference.
+  """
+  let moduleSourceID(
+    ws: Workspace!,
+    ref: String!,
+    cwd: String! = "",
+    local: Boolean! = false,
+    name: String! = "",
+  ): String! {
+    let cwdFlags = if (cwd == "") { [] } else { ["--cwd", cwd] }
+    let localFlags = if (local) { ["--local"] } else { [] }
+    let nameFlags = if (name == "") { [] } else { ["--name", name] }
+
+    container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/module-source", "."])
+      .withEnvVariable("DAGGER_TRACE_URL", cloud.traceURL)
+      .withEnvVariable("WORKSPACE_ID", toJSON(ws.id))
+      .withExec(["module-source"] + cwdFlags + localFlags + nameFlags + [ref], experimentalPrivilegedNesting: true)
+      .stdout
+      .trimSuffix("\n")
+  }
+
+  """
+  Return a ModuleSourceID backed by a Directory.
+  """
+  let directoryAsModuleSourceID(dir: Directory!, sourceRootPath: String!, name: String! = ""): String! {
+    let nameFlags = if (name == "") { [] } else { ["--name", name] }
+
+    container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helper", currentModule.source.directory("helpers/directory-as-module-source"))
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/directory-as-module-source", "."])
+      .withEnvVariable("DAGGER_TRACE_URL", cloud.traceURL)
+      .withEnvVariable("DIRECTORY_ID", toJSON(dir.id))
+      .withExec(["directory-as-module-source"] + nameFlags + [sourceRootPath], experimentalPrivilegedNesting: true)
+      .stdout
+      .trimSuffix("\n")
+  }
+
+  """
+  Return the generated-context changeset for a module source.
+  """
+  let moduleSourceChangeset(sourceID: String!, root: String!): NestedDaggerQuery! {
+    nestedDaggerQuery(
+      "module-source/generated-context-changeset",
+      toJSON({{
+        source: sourceID,
+        root: root,
+        before: "/before",
+        after: "/after",
+      }}),
+    )
+  }
+
+  """
+  Return workspace include patterns after replacing one dagger.json file.
+  """
+  let moduleSourceIncludeWithConfig(ws: Workspace!, path: String!, configPath: String!, config: File!): [String!]! {
+    container
+      .from("python:3.13-alpine")
+      .withDirectory("/dagger-configs", ws.directory("/", include: ["**/dagger.json"]))
+      .withFile("/dagger-configs/" + configPath, config)
+      .withFile("/includes.py", currentModule.source.file("helpers/module-source/includes.py"))
+      .withExec(["python3", "/includes.py", path])
+      .stdout
+      .split("\n")
+      .filter { path => path != "" }
+  }
+}

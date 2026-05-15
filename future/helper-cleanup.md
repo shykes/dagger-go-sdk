@@ -1,263 +1,461 @@
-# Helper Cleanup Handoff
+# Helper Cleanup Design
 
-This document records the intended helper boundary, the cleanup implemented so
-far, and the remaining core/Dang gaps that prevent deleting the helper operation
-subcommands entirely.
+This document records the helper boundary for the Go SDK Dang module after the
+cleanup. Helpers are narrow wrappers around core API gaps. They are not where Go
+SDK policy lives.
 
-## Goal
+## Goals
 
-Keep the helper responsible for the one thing the current module cannot do
-directly: load a `ModuleSource` from a `Directory`.
+- Prefer native Dang/core calls whenever they work.
+- Use helpers only for module-context bugs or Dang ID rehydration bugs.
+- Keep helpers composable: source helpers produce IDs, and the generic query
+  helper consumes IDs through raw GraphQL.
+- Do not mount the caller workspace into helpers as `/ws`.
+- Do not fake `.git` in the caller workspace. The update workaround may create
+  a tiny synthetic `.git/HEAD` marker inside `/mock` only to give core a local
+  context boundary.
+- Do not add operation-specific nested Dagger helpers for generation or
+  dependency mutation. The only remaining JSON transform helper is the
+  update-specific `helpers/module-config`.
 
-That is the hard boundary. The caller module function can prepare object IDs,
-paths, and flags, but `Directory -> ModuleSource` must happen outside the module
-function evaluator in a plain helper process with a nested Dagger client.
+## Bugs Being Worked Around
 
-The ideal boundary is:
+### Dang Cannot Rehydrate `*ID` Scalars
+
+Dang currently treats GraphQL `*ID` scalar inputs as object handles. For example,
+these fail during type inference:
+
+```dang
+loadModuleSourceFromID(id: stdout)
+loadModuleSourceFromID(id: stdout :: ModuleSourceID!)
+loadDirectoryFromID(id: someDirectoryID)
+```
+
+The explicit type hint changes the value type, but Dang still expects an object
+handle for the `id` argument. This is tracked as `vito/dang#47`.
+
+Raw GraphQL does not have that confusion:
+
+```graphql
+loadModuleSourceFromID(id: ModuleSourceID!): ModuleSource!
+loadDirectoryFromID(id: DirectoryID!): Directory!
+```
+
+So helper-produced IDs are consumed by a nested raw GraphQL helper, not by Dang
+typecasts.
+
+### Module-Side Source Loading Loses Caller Context
+
+Two source-loading calls are unreliable from inside this module:
+
+- `moduleSource(...)` cannot reliably access caller workspace files.
+- `Directory.asModuleSource(...)` can lose caller context during user-default
+  lookup and fail while searching for `.env`.
+
+Until those core/context bugs are fixed, source construction happens in helper
+processes that open nested Dagger clients.
+
+### `withDependencies` Rejects Workspace-Backed Directory Sources
+
+Local source helpers now produce workspace-backed directory module sources.
+Passing those to `ModuleSource.withDependencies` currently fails with:
+
+```text
+unhandled module source kind: DIR_SOURCE
+```
+
+The old helper mounted the workspace at `/ws` to force `LOCAL_SOURCE`. That
+workaround is intentionally removed. If `DIR_SOURCE` is rejected, that is a core
+API bug to fix, not a helper behavior to preserve.
+
+Dependency update is the exception: core's `withUpdateDependencies` still needs
+`LOCAL_SOURCE` so it can skip existing local dependencies and update remote
+dependencies. The workaround builds a tiny synthetic local tree containing only
+`dagger.json` files and runs the update query against that. It does not mount
+the caller workspace.
+
+### Dang JSON Edits Need Two Workarounds
+
+Dang can cast a literal core `JSON` scalar to a string:
+
+```dang
+toString("{}" :: JSON!)
+```
+
+`JSONValue.contents` is trickier. Calling `toString` on that result gives a JSON
+string literal. To pass the rendered JSON to file APIs, decode the string once:
+
+```dang
+let rendered = toString(value.contents(pretty: true))
+json().withContents(rendered :: JSON!).asString
+```
+
+The other wrinkle is that `dagger.json` dependencies are a legacy union shape:
+
+```json
+[
+  "../dep",
+  {"name": "other", "source": "github.com/acme/other"}
+]
+```
+
+The core `JSONValue` API can read fields and set fields:
+
+1. `File.asJSON`
+2. `JSONValue.field`
+3. `JSONValue.withField`
+4. `JSONValue.contents`
+
+`JSONValue.asArray` returns a GraphQL object list, so Dang list methods do not
+work on it directly. This fails:
+
+```text
+json().withContents("[...]" :: JSON!).asArray.map { value => ... }
+```
+
+The workaround from <https://github.com/vito/dang/issues/46> does apply: select
+a field first, then use list methods. For `JSONValue`, selecting `contents`
+gives each array item as raw JSON:
+
+```dang
+json()
+  .withContents("[...]" :: JSON!)
+  .asArray
+  .{contents}
+  .map { value => toString(value.contents) }
+```
+
+That is enough for dependency list/add/remove. Those edits now live in Dang and
+are built from raw JSON fragments. Dependency update is still the hard case
+because it needs POSIX path normalization and relative-path conversion for local
+dependencies.
+
+So dependency update still uses a tiny config-file transform. This is a plain
+file transform, not a nested Dagger client. If Dang grows convenient path
+operations, move the remaining update logic into `ModuleConfig` and delete the
+transform helper.
+
+## Helper Shape
+
+### `helpers/module-source`
+
+CLI:
 
 ```sh
 WORKSPACE_ID=... module-source REF [--cwd CWD] [--local] [--name NAME]
 ```
 
-The helper should print exactly one `ModuleSourceID`. Dang should then recover a
-`ModuleSource` handle from that ID and own generation, dependency mutation, and
-changeset rooting. This would not violate the hard boundary because the
-`Directory -> ModuleSource` load already happened in the helper.
+Output: exactly one `ModuleSourceID` on stdout.
 
-## Why A Helper Exists
-
-Module functions cannot safely perform `Directory.asModuleSource(...)` for
-caller workspace directories. Direct calls from this Dang module can lose the
-original caller workspace context during local dependency and user-default
-resolution. One observed failure path tries to load user defaults from the
-module client context and then calls `Host.findUp(".env")` without the caller
-host cwd/session.
-
-The helper opens a nested Dagger client from inside the workspace operation, so
-workspace-backed local refs can be resolved with the caller workspace object
-instead of the helper container filesystem.
-
-Do not turn this helper into a Dagger/Dang module function. That puts the
-forbidden `Directory -> ModuleSource` conversion back inside the module function
-boundary.
-
-## Preserve
-
-- Go SDK module generation works for workspace modules with local dependencies.
-- `init --name foo` works in an empty repo.
-- `init --name foo --path ./foo/bar` works in an empty repo.
-- Dependency add/remove/update returns changesets rooted at `Workspace.path`.
-- Local dependency refs resolve relative to the target module.
-- Remote and ambiguous non-local refs flow through core `moduleSource(ref)`.
-- The helper does not own policy that core can already handle.
-
-## Implemented Now
-
-The helper binary is built as `module-source`. The source directory is still
-`helpers/workspace-module-source` to keep the patch narrow.
-
-Environment:
-
-- `WORKSPACE_ID`: required for workspace-backed resolution.
-- `SEED_DIRECTORY_ID`: optional synthetic seed directory for init generation.
-
-Primary command:
-
-```sh
-module-source REF [--cwd CWD] [--local] [--name NAME]
-```
-
-This implements the desired ID-only protocol and prints a `ModuleSourceID`.
-
-Temporary operation commands:
-
-```sh
-module-source generate REF CHANGESET_ROOT BEFORE_DIR AFTER_DIR [--cwd CWD] [--local] [--name NAME]
-module-source deps-add TARGET_REF DEP_REF CHANGESET_ROOT BEFORE_DIR AFTER_DIR [--name NAME]
-module-source deps-remove TARGET_REF DEP_NAME CHANGESET_ROOT BEFORE_DIR AFTER_DIR
-module-source deps-update TARGET_REF DEP_NAME CHANGESET_ROOT BEFORE_DIR AFTER_DIR
-module-source render-template MODULE_NAME TEMPLATE_DIR OUT_DIR
-```
-
-Dang still calls these operation commands for now. They are intentionally thin:
-the helper resolves the source, invokes the relevant core `ModuleSource` method,
-and exports before/after directories for Dang to turn into a changeset.
-
-## Current Blockers To The Ideal Boundary
-
-1. Dang cannot currently recover a `ModuleSource` handle from the raw ID printed
-   by the helper.
-
-   Attempting `loadModuleSourceFromID(helperStdout)` fails with a type mismatch:
-   the raw string, even with a `ModuleSourceID` type hint, is not the
-   `ModuleSource` handle Dang expects. `vito/dang#46` documents the related
-   GraphQL object-list projection issue; it does not provide a way to cast an
-   arbitrary stdout string into a GraphQL object handle.
-
-   Once Dang has a supported way to consume a helper-created `ModuleSourceID` as
-   a `ModuleSource` handle, generation and dependency mutation can move out of
-   the helper while keeping `Directory -> ModuleSource` in the helper.
-
-2. Local dependency mutation currently rejects workspace-backed `DIR_SOURCE`
-   values.
-
-   Using a workspace-backed dependency source with `withDependencies` hits
-   `unhandled module source kind: DIR_SOURCE`. For dependency commands only,
-   Dang mounts the workspace at `/ws` and the helper uses
-   `client.ModuleSource("/ws/...", RequireKind: LOCAL_SOURCE)` for local target
-   and dependency sources. This is a compatibility bridge, not the desired
-   final boundary.
-
-3. Init generation from a seeded directory still needs the nested client.
-
-   Init seeds a `Directory`, then needs that directory loaded as a
-   `ModuleSource`. That is the same hard boundary. The helper now receives
-   `SEED_DIRECTORY_ID` instead of a mounted seed directory, so it avoids the
-   previous empty-result mount failure while keeping init generation in the
-   nested client.
-
-## Resolution Rules
-
-The helper only positively identifies workspace-local refs. Everything else
-falls through to core parsing unless the caller explicitly requires a local ref.
+Behavior:
 
 1. Load `Workspace` from `WORKSPACE_ID`.
-2. Determine cwd:
-   - `--cwd`, when provided.
-   - otherwise `Workspace.path`.
-3. Resolve the candidate workspace path:
-   - absolute refs are cleaned inside the workspace boundary.
-   - relative refs are joined with cwd.
-4. Check whether the candidate exists as a workspace directory.
-5. If it exists, compute the include patterns for that module and its local
-   dependency tree, then build:
+2. Resolve `REF` against `--cwd` or `Workspace.path`.
+3. If the resolved path exists in the workspace, compute include patterns from
+   `dagger.json` files and local dependencies, then call
+   `Workspace.directory(...).asModuleSource(sourceRootPath: ...)`.
+4. If the path does not exist and `--local` was set, fail.
+5. Otherwise call core `moduleSource(ref, disableFindUp: true)`.
+6. Apply `withName` when `--name` is set.
+7. Print the source ID.
 
-```go
-src := ws.
-    Directory("/", dagger.WorkspaceDirectoryOpts{Include: include}).
-    AsModuleSource(dagger.DirectoryAsModuleSourceOpts{
-        SourceRootPath: candidate,
-    })
-```
+This helper does not mount the workspace into its container. It reads
+`dagger.json` files through the `Workspace` object.
 
-6. If it does not exist:
-   - `--local` returns an error.
-   - otherwise use core parsing:
+### `helpers/directory-as-module-source`
 
-```go
-src := client.ModuleSource(ref, dagger.ModuleSourceOpts{
-    DisableFindUp: true,
-})
-```
-
-7. If `--name` is set, apply `src = src.WithName(name)`.
-8. Print `src.ID(ctx)`.
-
-## Dang Integration Today
-
-Init:
-
-- If no path is provided and no `.dagger` directory exists, use
-  `.dagger/modules/<name>`.
-- Normalize explicit paths like `./foo/bar` to `foo/bar`.
-- Build a seed directory in Dang.
-- Pass the seed by object ID:
-
-```dang
-.withEnvVariable("SEED_DIRECTORY_ID", toJSON(seeded.id))
-.withExec(["module-source", "generate", "--local", moduleChangesetPath, ".", "/before", "/after"])
-```
-
-Module generation:
-
-```dang
-.withExec(["module-source", "generate", "--cwd", ".", "--local", path, workspacePath, "/before", "/after"])
-```
-
-Dependency add/remove/update:
-
-- Build the helper with `WORKSPACE_ID`.
-- Mount the caller workspace at `/ws`, excluding `.git`.
-- Add a minimal `/ws/.git/HEAD`.
-- Call the thin dependency subcommand.
-
-This `/ws` mount should disappear once core accepts workspace-backed
-`DIR_SOURCE` dependency sources.
-
-## Desired Final Dang Integration
-
-When helper-created `ModuleSourceID` values can be consumed as `ModuleSource`
-handles, replace operation commands with:
-
-```dang
-let src = loadModuleSourceFromID(id: helperStdout)
-let changes = src.generatedContextChangeset
-changes.after.directory(ws.path).changes(changes.before.directory(ws.path))
-```
-
-Dependency add should become:
-
-```dang
-let target = loadModuleSourceFromID(id: helperSourceID(ws, path, local: true))
-let dep = loadModuleSourceFromID(id: helperSourceID(ws, source, cwd: path, name: name))
-let changes = target.withDependencies([dep]).generatedContextChangeset
-changes.after.directory(ws.path).changes(changes.before.directory(ws.path))
-```
-
-Remove/update are the same shape: load the target source ID, call the core
-mutation, and root the returned changeset in Dang.
-
-## Follow-Up Core/Dang Issue
-
-Request a first-class workspace-scoped module source API so this module does not
-need to shell out to a helper at all:
-
-```graphql
-Workspace.moduleSource(refString: String!, cwd: String, name: String): ModuleSource!
-```
-
-The API should:
-
-- resolve workspace-local refs from the caller workspace context.
-- delegate remote and ambiguous refs to core module source parsing.
-- preserve caller context for local dependency and user-default resolution.
-- return a real `ModuleSource` handle that Dang can mutate directly.
-
-## Verification Checklist
-
-Helper tests:
+CLI:
 
 ```sh
-cd helpers/workspace-module-source
-go test ./...
+DIRECTORY_ID=... directory-as-module-source SOURCE_ROOT_PATH [--name NAME]
+```
+
+Output: exactly one `ModuleSourceID` on stdout.
+
+Behavior:
+
+1. Load `Directory` from `DIRECTORY_ID`.
+2. Call `Directory.asModuleSource(sourceRootPath: SOURCE_ROOT_PATH)`.
+3. Apply `withName` when `--name` is set.
+4. Print the source ID.
+
+This is used by `init`, where Dang first constructs a seeded directory and then
+needs that directory interpreted as a module source.
+
+### `helpers/dagger-query`
+
+CLI:
+
+```sh
+DAGGER_QUERY_VARS_JSON=... dagger-query --query /query.graphql --out /response.json
+```
+
+Output: `/response.json` plus any files/directories exported by the query.
+
+Behavior:
+
+1. Open a nested Dagger client.
+2. Read the checked-in GraphQL query file.
+3. Load variables from `DAGGER_QUERY_VARS_JSON`, which is raw JSON text.
+4. Execute the raw GraphQL request.
+5. Write the full response object to `--out`.
+
+The helper is generic. It does not know about Go SDK generation, dependencies,
+or changesets.
+
+### `helpers/module-config`
+
+CLI:
+
+```sh
+module-config.py synthetic --module-path PATH
+module-config.py replace-dependencies --response RESPONSE --source-root SOURCE_ROOT
+```
+
+Input: `/dagger.json`.
+
+Output:
+
+- `synthetic` writes a minimal local module tree to `/mock`.
+- `replace-dependencies` reads the dependency metadata from a query response and
+  writes `/out/dagger.json`.
+
+This helper only supports dependency update. It does not open a Dagger client,
+load module sources, generate code, or compute changesets.
+
+The synthetic tree is intentionally tiny:
+
+```text
+/mock/.git/HEAD
+/mock/<module>/dagger.json
+/mock/<local-dep>/dagger.json
+```
+
+The `.git/HEAD` file is only a context boundary for core's local
+`ModuleSource` loader. It is not a workspace mount and does not copy source
+files.
+
+## Dang Wrapper
+
+The public constructor is exposed from the module root:
+
+```dang
+pub nestedDaggerQuery(name: String!, varsJSON: String!): NestedDaggerQuery!
+```
+
+Callers usually build `varsJSON` with Dang's `toJSON(...)` builtin. The wrapper
+does not use core `JSONValue` for query variables.
+
+`NestedDaggerQuery` lives in `00-nested-dagger-query.dang`:
+
+```dang
+type NestedDaggerQuery {
+  """Return the container state before executing the query."""
+  pub inputContainer: Container!
+
+  """Return the container state after executing the query."""
+  pub outputContainer: Container!
+
+  """Return the engine's GraphQL response to the query."""
+  pub response: JSON!
+
+  """Return a string value extracted from the query response at the given path."""
+  pub responseString(path: [String!]!): String!
+
+  """
+  Return a directory from the container in which the query was executed.
+
+  Use this to retrieve side effects of the query, for example exported files or
+  directories.
+  """
+  pub outputDir(path: String! = ".", include: [String!]! = [], exclude: [String!]! = []): Directory!
+}
+```
+
+The wrapper deliberately does not return a `Changeset`. The query controls its
+own side effects. The call site chooses how to interpret them:
+
+```dang
+let q = DaggerQueryHelpers().nestedDaggerQuery(
+  "module-source/generated-context-changeset",
+  toJSON({{
+    source: sourceID,
+    root: ".",
+    before: "/before",
+    after: "/after",
+  }}),
+)
+
+q.outputDir("/after").changes(q.outputDir("/before"))
+```
+
+## Query Files
+
+Checked-in query files are the operation layer:
+
+```text
+queries/module-source/generated-context-changeset.graphql
+queries/module-source/updated-dependencies.graphql
+```
+
+Generation query:
+
+```graphql
+query GeneratedContextChangeset(
+  $source: ModuleSourceID!
+  $root: String!
+  $before: String!
+  $after: String!
+) {
+  loadModuleSourceFromID(id: $source) {
+    generatedContextChangeset {
+      before {
+        directory(path: $root) {
+          export(path: $before)
+        }
+      }
+      after {
+        directory(path: $root) {
+          export(path: $after)
+        }
+      }
+    }
+  }
+}
+```
+
+Update query:
+
+```graphql
+query UpdatedDependencies($source: String!, $updates: [String!]!) {
+  moduleSource(refString: $source, disableFindUp: true, requireKind: LOCAL_SOURCE) {
+    withUpdateDependencies(dependencies: $updates) {
+      dependencies {
+        moduleName
+        kind
+        asString
+        pin
+      }
+    }
+  }
+}
+```
+
+The update query does not call `generatedContextDirectory`. It asks core to
+resolve the updated dependency set, then `helpers/module-config` writes that
+dependency list back into the original `dagger.json`.
+
+## Current Flow
+
+Generation:
+
+1. Build a `ModuleSourceID` with `helpers/module-source`.
+2. Run `queries/module-source/generated-context-changeset.graphql` through
+   `helpers/dagger-query`.
+3. Convert `/after` and `/before` into a changeset in Dang.
+
+Init with generation:
+
+1. Build the seeded directory in Dang.
+2. Build a `ModuleSourceID` with `helpers/directory-as-module-source`.
+3. Run the generated-context query through `helpers/dagger-query`.
+4. Compare `/after` to an empty directory so seeded files and generated files
+   are included.
+
+Dependency add:
+
+1. Edit `dagger.json` in Dang through `ModuleConfig`.
+2. Compute workspace include patterns from the edited config.
+3. Build a directory-backed `ModuleSourceID` from the edited workspace view.
+4. Run the generated-context query.
+5. Compare `/after` to the original workspace directory so the config edit and
+   generated files are both included.
+
+Dependency remove:
+
+1. Edit `dagger.json` in Dang through `ModuleConfig`.
+2. Compute workspace include patterns from the edited config.
+3. Build a directory-backed `ModuleSourceID` from the edited workspace view.
+4. Run the generated-context query.
+5. Compare `/after` to the original workspace directory.
+
+Dependency update:
+
+1. Build a minimal synthetic local tree containing only `dagger.json` files.
+2. Add `/mock/.git/HEAD` so core treats `/mock` as the local context root.
+3. Run the update query against `/mock/<module>` as a `LOCAL_SOURCE`.
+4. Merge the returned dependency metadata into the original `dagger.json`.
+5. Use the same generated-context changeset flow as add/remove.
+
+Update-all skips local dependencies, matching core behavior. Updating a named
+local dependency still fails with core's "updating local dependencies is not
+supported" error.
+
+## Deleted
+
+The old `helpers/workspace-module-source` helper is removed. It contained the
+operation-specific commands and the `/ws` workspace mount workaround.
+
+The public `workspaceModuleSource` and `workspaceModuleSourceInclude` wrappers
+are removed too. The former could only be implemented with the broken
+module-side `Directory.asModuleSource(...)` call until Dang can rehydrate
+helper-produced `ModuleSourceID` values. The latter was debug-only
+introspection that exposed implementation details on the root API.
+
+## Removal Path
+
+When Dang can pass `*ID` scalar values to `load*FromID`, delete
+`helpers/dagger-query` and the query files. Dang can then do the rehydration and
+follow-up calls natively.
+
+When module-side `moduleSource(...)` and `Directory.asModuleSource(...)` preserve
+caller context correctly, delete the source-ID helpers too.
+
+When Dang can comfortably handle the remaining path logic, consider deleting
+`helpers/module-config` and moving dependency update fully into Dang.
+If core dependency mutation APIs are fixed first, prefer those APIs instead.
+
+## Verification
+
+Helper builds:
+
+```sh
+cd helpers/module-source && go test ./...
+cd helpers/directory-as-module-source && go test ./...
+cd helpers/dagger-query && go test ./...
+cd helpers/render-template && go test ./...
+python3 -m py_compile helpers/module-config/module-config.py
 ```
 
 Function surface:
 
 ```sh
-dagger functions
+dagger functions --progress=plain
 ```
 
-Empty repo init:
+Init generation smoke, from a git-initialized empty repo:
 
 ```sh
 dagger -m /path/to/go-sdk call init --name foo added-paths
-```
-
-Empty repo init with explicit nested path:
-
-```sh
 dagger -m /path/to/go-sdk call init --name foo --path ./foo/bar added-paths
 ```
 
-Module generation smoke:
-
-```sh
-dagger -m /path/to/go-sdk call mod --path . generate added-paths
-```
-
-Local dependency add smoke:
+Local dependency add/remove smoke:
 
 ```sh
 dagger -m /path/to/go-sdk call mod --path app deps add --source ../lib --name lib modified-paths
+dagger -m /path/to/go-sdk call mod --path app deps remove --name lib modified-paths
+```
+
+Dependency update smoke:
+
+```sh
+dagger -m /path/to/go-sdk call mod --path app deps update modified-paths
+```
+
+Named local dependency update should still fail with core's unsupported-local
+message:
+
+```sh
+dagger -m /path/to/go-sdk call mod --path app deps update --name lib modified-paths
 ```

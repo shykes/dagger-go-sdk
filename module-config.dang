@@ -1,0 +1,181 @@
+"""
+Read and edit a module's dagger.json file.
+"""
+type ModuleConfig {
+  let file: File!
+
+  let mockRoot: String! = "/mock"
+
+  """
+  Return dependency names when present, otherwise dependency sources.
+  """
+  pub dependencies: [String!]! {
+    dependencyFragments
+      .map { dependency => dependencyName(dependency) }
+      .filter { dependency => dependency != "" }
+  }
+
+  """
+  Return dagger.json with one dependency appended.
+
+  Named dependencies are written as objects. Unnamed dependencies are written as
+  strings to match the existing dagger.json format.
+  """
+  pub withDependency(source: String!, name: String! = ""): File! {
+    let dependency = if (name == "") {
+      toString(toJSON(source))
+    } else {
+      toString(toJSON({{ name: name, source: source }}))
+    }
+    withDependencyFragments(dependencyFragments + [dependency])
+  }
+
+  """
+  Return dagger.json with dependencies matching the given name or source removed.
+  """
+  pub withoutDependency(name: String!): File! {
+    withDependencyFragments(
+      dependencyFragments.filter { dependency =>
+        dependencyName(dependency) != name and dependencySource(dependency) != name
+      },
+    )
+  }
+
+  """
+  Return dagger.json after updating one dependency, or all remote dependencies.
+
+  This uses a tiny synthetic module tree because the Dagger update API currently
+  requires a local module source.
+  """
+  pub withUpdatedDependencies(ws: Workspace!, modulePath: String!, name: String! = ""): File! {
+    let updates = if (name == "") { [] } else { [name] }
+    let query = DaggerQueryHelpers()
+      .nestedDaggerQueryWithDirectory(
+        "module-source/updated-dependencies",
+        toJSON({{
+          source: mockSource(modulePath),
+          updates: updates,
+        }}),
+        mockRoot,
+        syntheticDirectory(ws, modulePath),
+      )
+
+    baseHelper
+      .withFile("/response.json", query.outputContainer.file("/response.json"))
+      .withExec([
+        "python3", "/module-config.py",
+        "replace-dependencies",
+        "--response", "/response.json",
+        "--source-root", mockSource(modulePath),
+      ])
+      .file("/out/dagger.json")
+  }
+
+  """
+  Return each dependency entry as raw JSON text.
+
+  Keeping raw fragments preserves both string and object dependency entries.
+  """
+  let dependencyFragments: [String!]! {
+    let config = file.asJSON
+    if (config.fields.contains("dependencies") == true) {
+      let dependencies = config.field(["dependencies"])
+      if (toString(dependencies.contents) == "null") {
+        []
+      } else {
+        dependencies
+          .asArray
+          .{contents}
+          .map { dependency => toString(dependency.contents) }
+      }
+    } else {
+      []
+    }
+  }
+
+  """
+  Return the dependency's configured name, or its source if no name is set.
+  """
+  let dependencyName(dependency: String!): String! {
+    let value = json().withContents(dependency :: JSON!)
+    if (isJSONString(dependency)) {
+      value.asString
+    } else if (value.fields.contains("name") == true) {
+      value.field(["name"]).asString
+    } else if (value.fields.contains("source") == true) {
+      value.field(["source"]).asString
+    } else {
+      ""
+    }
+  }
+
+  """
+  Return the dependency source.
+  """
+  let dependencySource(dependency: String!): String! {
+    let value = json().withContents(dependency :: JSON!)
+    if (isJSONString(dependency)) {
+      value.asString
+    } else if (value.fields.contains("source") == true) {
+      value.field(["source"]).asString
+    } else {
+      ""
+    }
+  }
+
+  """
+  Return true when a JSON fragment is a string value.
+  """
+  let isJSONString(value: String!): Boolean! {
+    value.trimPrefix("\"") != value
+  }
+
+  """
+  Return dagger.json with the given dependency fragments as its dependencies.
+  """
+  let withDependencyFragments(dependencies: [String!]!): File! {
+    let updated = file.asJSON.withField(
+      ["dependencies"],
+      json().withContents(("[" + dependencies.join(",") + "]") :: JSON!),
+    )
+    directory
+      .withNewFile("dagger.json", jsonContentsString(updated) + "\n")
+      .file("dagger.json")
+  }
+
+  """
+  Return rendered JSON as plain file contents.
+  """
+  let jsonContentsString(value: JSONValue!): String! {
+    # JSONValue.contents is a JSON scalar. toString encodes it as a JSON string
+    # literal, so decode once before passing it to file APIs that need String.
+    json().withContents(toString(value.contents(pretty: true)) :: JSON!).asString
+  }
+
+  """
+  Return a minimal local module tree for dependency update.
+  """
+  let syntheticDirectory(ws: Workspace!, modulePath: String!): Directory! {
+    baseHelper
+      .withDirectory("/workspace-configs", ws.directory("/", include: ["**/dagger.json"]))
+      .withExec(["python3", "/module-config.py", "synthetic", "--module-path", modulePath])
+      .directory(mockRoot)
+  }
+
+  """
+  Return the synthetic source path for the module being updated.
+  """
+  let mockSource(modulePath: String!): String! {
+    if (modulePath == ".") { mockRoot } else { mockRoot + "/" + modulePath }
+  }
+
+  """
+  Return the Python helper container used only by dependency update.
+  """
+  let baseHelper: Container! {
+    container
+      .from("python:3.13-alpine")
+      .withFile("/dagger.json", file)
+      .withFile("/module-config.py", currentModule.source.file("helpers/module-config/module-config.py"))
+  }
+}

@@ -1,0 +1,78 @@
+"""
+Dagger dependencies for a Go SDK module.
+"""
+type ModDeps {
+  """
+  Workspace-relative path of the module root.
+  """
+  let path: String!
+
+  """
+  Workspace-relative path where changesets should be rooted.
+  """
+  let workspacePath: String!
+
+  """
+  This module's dagger.json.
+  """
+  let daggerJSON: File!
+
+  """
+  Return dependency names when present, otherwise dependency sources.
+  """
+  pub list: [String!]! {
+    ModuleConfig(file: daggerJSON).dependencies
+  }
+
+  """
+  Add a Dagger dependency and regenerate this module.
+  """
+  pub add(ws: Workspace!, source: String!, name: String! = ""): Changeset! {
+    changesetWithConfig(ws, ModuleConfig(file: daggerJSON).withDependency(source, name))
+  }
+
+  """
+  Remove a Dagger dependency by name or source and regenerate this module.
+  """
+  pub remove(ws: Workspace!, name: String!): Changeset! {
+    changesetWithConfig(ws, ModuleConfig(file: daggerJSON).withoutDependency(name))
+  }
+
+  """
+  Update one dependency by name or source, or update all remote dependencies.
+  """
+  pub update(ws: Workspace!, name: String! = ""): Changeset! {
+    changesetWithConfig(ws, ModuleConfig(file: daggerJSON).withUpdatedDependencies(ws, path, name))
+  }
+
+  """
+  Regenerate the module after replacing its dagger.json file.
+  """
+  let changesetWithConfig(ws: Workspace!, config: File!): Changeset! {
+    let include = DaggerQueryHelpers().moduleSourceIncludeWithConfig(ws, path, configPath, config)
+    let sourceDirectory = ws.directory("/", include: include).withFile(configPath, config)
+    let sourceID = DaggerQueryHelpers().directoryAsModuleSourceID(sourceDirectory, path)
+    let query = DaggerQueryHelpers().moduleSourceChangeset(sourceID, workspacePath)
+
+    query.outputDir("/after").changes(workspaceDirectory(ws, include))
+  }
+
+  """
+  Return the workspace files used as the before side of the changeset.
+  """
+  let workspaceDirectory(ws: Workspace!, include: [String!]!): Directory! {
+    let root = ws.directory("/", include: include)
+    if (workspacePath == ".") {
+      root
+    } else {
+      root.directory(workspacePath)
+    }
+  }
+
+  """
+  Return this module's dagger.json path from the workspace root.
+  """
+  let configPath: String! {
+    if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
+  }
+}

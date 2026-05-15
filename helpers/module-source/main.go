@@ -116,7 +116,7 @@ func moduleSource(
 	cwd := opts.cwd
 	if cwd == "" {
 		var err error
-		cwd, err = workspace.Path(ctx)
+		cwd, err = currentWorkspacePath(ctx, workspace)
 		if err != nil {
 			return nil, err
 		}
@@ -332,6 +332,16 @@ func workspacePath(cwd, ref string) (string, error) {
 		return clean(ref)
 	}
 	return clean(path.Join(cwd, ref))
+}
+
+func currentWorkspacePath(ctx context.Context, workspace *dagger.Workspace) (string, error) {
+	// Newer engines do not expose Workspace.path. Searching for "." from "."
+	// returns the current workspace directory as a workspace-root-relative path.
+	cwd, err := workspace.FindUp(ctx, ".", dagger.WorkspaceFindUpOpts{From: "."})
+	if err != nil {
+		return "", err
+	}
+	return clean(cwd)
 }
 
 func mustBeLocalRef(ref string) bool {

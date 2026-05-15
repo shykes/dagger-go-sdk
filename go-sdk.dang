@@ -20,6 +20,13 @@ type GoSdk {
   }
 
   """
+  Check the workspace fork shim that roots returned changesets for the caller.
+  """
+  pub workspaceForkShimCheck(ws: Workspace!): Void @check {
+    WorkspaceForkChecks().run(ws)
+  }
+
+  """
   Return every Dagger module whose sdk.source is "go".
   """
   pub modules(ws: Workspace!): [Mod!]! {
@@ -105,10 +112,11 @@ type GoSdk {
     }
 
     let configPath = if (modPath == ".") { "dagger.json" } else { modPath + "/dagger.json" }
+    let fork = WorkspaceForks().fork(ws)
 
     Mod(
       path: modPath,
-      workspacePath: ws.path,
+      fork: fork,
       daggerJSON: ws.directory("/", include: [configPath]).file(configPath),
       skipGenerateFilename: skipGenerateFilename,
     )
@@ -151,21 +159,9 @@ type GoSdk {
       rawPath.trimSuffix("/")
     }
 
-    let moduleChangesetPath = if (ws.path == ".") {
-      modPath
-    } else if (modPath == ws.path) {
-      "."
-    } else {
-      let relative = modPath.trimPrefix(ws.path + "/")
-      if (relative == modPath) {
-        raise "module path " + modPath + " is outside changeset root " + ws.path
-      } else {
-        relative
-      }
-    }
     let configPath = if (modPath == ".") { "dagger.json" } else { modPath + "/dagger.json" }
-    let configChangesetPath = if (moduleChangesetPath == ".") { "dagger.json" } else { moduleChangesetPath + "/dagger.json" }
     let selectedTemplate = if (template == "") { "minimal" } else { template }
+    let fork = WorkspaceForks().fork(ws)
 
     if (ws.directory("/", include: [configPath]).exists(configPath)) {
       raise "module already exists: " + modPath
@@ -178,18 +174,17 @@ type GoSdk {
       } else {
         currentModule.source.directory("templates/" + selectedTemplate)
       }
-      let seeded =
-        directory
-          .withDirectory(moduleChangesetPath, templateSource)
-          .withNewFile(configChangesetPath, config)
+      let seeded = fork
+        .withDirectory(modPath, templateSource)
+        .withNewFile(configPath, config)
 
       if (generate) {
-        let sourceID = DaggerQueryHelpers().directoryAsModuleSourceID(seeded, moduleChangesetPath)
+        let sourceID = DaggerQueryHelpers().directoryAsModuleSourceID(seeded.clientDirectory, seeded.clientPath(modPath))
         let query = DaggerQueryHelpers().moduleSourceChangeset(sourceID, ".")
 
-        query.outputDir("/after").changes(directory)
+        fork.withDirectoryDiff(fork.cwd, directory, query.outputDir("/after")).changes
       } else {
-        seeded.changes(directory)
+        seeded.changes
       }
     }
   }
@@ -216,10 +211,11 @@ type GoSdk {
   Modules with the generate skip marker are skipped.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
-    changeset.withChangesets(
-      modules(ws)
-        .filter { mod => mod.skipGenerate(ws) == false }
-        .map { mod => mod.generate(ws) },
-    )
+    modules(ws)
+      .filter { mod => mod.skipGenerate(ws) == false }
+      .reduce(WorkspaceForks().fork(ws)) { fork, mod =>
+        fork.merge(mod.generateFork(ws))
+      }
+      .changes
   }
 }

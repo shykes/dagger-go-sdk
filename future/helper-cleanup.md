@@ -144,7 +144,7 @@ Output: exactly one `ModuleSourceID` on stdout.
 Behavior:
 
 1. Load `Workspace` from `WORKSPACE_ID`.
-2. Resolve `REF` against `--cwd` or `Workspace.path`.
+2. Resolve `REF` against `--cwd` or the current workspace directory.
 3. If the resolved path exists in the workspace, compute include patterns from
    `dagger.json` files, declared `include` entries, and local dependencies, then call
    `Workspace.directory(...).asModuleSource(sourceRootPath: ...)`.

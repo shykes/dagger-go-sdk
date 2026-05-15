@@ -8,9 +8,9 @@ type ModEngine {
   let path: String!
 
   """
-  Workspace-relative path where changesets should be rooted.
+  Fork used to stage workspace-rooted changes.
   """
-  let workspacePath: String!
+  let fork: WorkspaceFork!
 
   """
   This module's dagger.json.
@@ -30,9 +30,7 @@ type ModEngine {
   pub require(version: String!): Changeset! {
     let current = daggerJSON.asJSON.field(["engineVersion"]).asString
     let required = normalizedVersion(version)
-    let before = directory.withFile(changesetPath, daggerJSON)
-    let after = directory.withFile(changesetPath, daggerJSON.withReplaced(toJSON(current), toJSON(required)))
-    after.changes(before)
+    fork.withFile(configPath, daggerJSON.withReplaced(toJSON(current), toJSON(required))).changes
   }
 
   """
@@ -50,20 +48,10 @@ type ModEngine {
   }
 
   """
-  Return this module's dagger.json path from the changeset root.
+  Return this module's dagger.json path from the workspace root.
   """
-  let changesetPath: String! {
-    let configPath = if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
-    if (workspacePath == ".") {
-      configPath
-    } else {
-      let relative = configPath.trimPrefix(workspacePath + "/")
-      if (relative == configPath) {
-        raise "module path " + path + " is outside changeset root " + workspacePath
-      } else {
-        relative
-      }
-    }
+  let configPath: String! {
+    if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
   }
 
   """

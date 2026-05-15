@@ -8,9 +8,9 @@ type Mod {
   pub path: String!
 
   """
-  Workspace-relative path where changesets should be rooted.
+  Fork used to stage workspace-rooted changes.
   """
-  let workspacePath: String!
+  let fork: WorkspaceFork!
 
   """
   This module's dagger.json.
@@ -35,7 +35,7 @@ type Mod {
   pub deps: ModDeps! {
     ModDeps(
       path: path,
-      workspacePath: workspacePath,
+      fork: fork,
       daggerJSON: daggerJSON,
     )
   }
@@ -46,7 +46,7 @@ type Mod {
   pub engine: ModEngine! {
     ModEngine(
       path: path,
-      workspacePath: workspacePath,
+      fork: fork,
       daggerJSON: daggerJSON,
     )
   }
@@ -64,13 +64,21 @@ type Mod {
   If the generate skip marker is present, the changeset is empty.
   """
   pub generate(ws: Workspace!): Changeset! {
+    generateFork(ws).changes
+  }
+
+  """
+  Generate this module into a workspace fork.
+  If the generate skip marker is present, the fork is empty.
+  """
+  let generateFork(ws: Workspace!): WorkspaceFork! {
     if (skipGenerate(ws)) {
-      directory.changes(directory)
+      fork
     } else {
       let sourceID = DaggerQueryHelpers().moduleSourceID(ws, path, cwd: ".", local: true)
-      let query = DaggerQueryHelpers().moduleSourceChangeset(sourceID, workspacePath)
+      let query = DaggerQueryHelpers().moduleSourceChangeset(sourceID, fork.cwd)
 
-      query.outputDir("/after").changes(query.outputDir("/before"))
+      fork.withDirectoryDiff(fork.cwd, query.outputDir("/before"), query.outputDir("/after"))
     }
   }
 }

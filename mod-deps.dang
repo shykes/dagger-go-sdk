@@ -8,9 +8,9 @@ type ModDeps {
   let path: String!
 
   """
-  Workspace-relative path where changesets should be rooted.
+  Fork used to stage workspace-rooted changes.
   """
-  let workspacePath: String!
+  let fork: WorkspaceFork!
 
   """
   This module's dagger.json.
@@ -50,26 +50,13 @@ type ModDeps {
   Return a changeset containing only the edited dagger.json file.
   """
   let changesetWithConfig(config: File!): Changeset! {
-    let before = directory.withFile(changesetPath, daggerJSON)
-    let after = directory.withFile(changesetPath, config)
-
-    after.changes(before)
+    fork.withFile(configPath, config).changes
   }
 
   """
-  Return this module's dagger.json path from the changeset root.
+  Return this module's dagger.json path from the workspace root.
   """
-  let changesetPath: String! {
-    let configPath = if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
-    if (workspacePath == ".") {
-      configPath
-    } else {
-      let relative = configPath.trimPrefix(workspacePath + "/")
-      if (relative == configPath) {
-        raise "module path " + path + " is outside changeset root " + workspacePath
-      } else {
-        relative
-      }
-    }
+  let configPath: String! {
+    if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
   }
 }

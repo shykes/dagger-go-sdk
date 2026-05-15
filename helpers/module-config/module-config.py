@@ -123,7 +123,9 @@ def synthetic_directory(args):
     write_text(posixpath.join(MOCK_ROOT, ".git", "HEAD"), "ref: refs/heads/main\n")
     write_synthetic_module(module_path, config)
 
-    dependencies = config.get("dependencies") or []
+    dependencies = config.get("dependencies", [])
+    if dependencies is None:
+        dependencies = []
     if not isinstance(dependencies, list):
         raise SystemExit("dagger.json dependencies must be an array")
 

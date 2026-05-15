@@ -53,6 +53,59 @@ type E2e {
   }
 
   """
+  Return a temporary file with the given contents.
+  """
+  let fileWithContents(contents: String!): File! {
+    directory.withNewFile("value", contents).file("value")
+  }
+
+  """
+  Return the dependency config helper used by the Go SDK module.
+  """
+  let moduleConfigHelper(ws: Workspace!): Container! {
+    container
+      .from("python:3.13-alpine")
+      .withFile(
+        "/module-config.py",
+        ws
+          .directory("/", include: ["helpers/module-config/module-config.py"])
+          .file("helpers/module-config/module-config.py"),
+      )
+  }
+
+  """
+  Run the dependency config helper and expect synthetic tree creation to fail.
+  """
+  let failedSyntheticConfig(ws: Workspace!, config: String!, configs: Directory!, modulePath: String!): Container! {
+    moduleConfigHelper(ws)
+      .withFile("/dagger.json", fileWithContents(config))
+      .withDirectory("/workspace-configs", configs)
+      .withExec(
+        ["python3", "/module-config.py", "synthetic", "--module-path", modulePath],
+        expect: ReturnType.FAILURE,
+      )
+  }
+
+  """
+  Return the nested GraphQL query helper used by the Go SDK module.
+  """
+  let daggerQueryHelper(ws: Workspace!): Container! {
+    container
+      .from("golang:1.25-alpine")
+      .withoutEntrypoint
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory(
+        "/helper",
+        ws
+          .directory("/", include: ["helpers/dagger-query/**"])
+          .directory("helpers/dagger-query"),
+      )
+      .withWorkdir("/helper")
+      .withExec(["go", "build", "-o", "/usr/local/bin/dagger-query", "."])
+  }
+
+  """
   The helper should expose the generate skip marker used by callers.
   """
   pub skipGenerateFilenameCheck: Void @check {
@@ -182,6 +235,7 @@ type E2e {
 
     assert(contains(deps, "../dep-string"), "string dependency source was not listed")
     assert(contains(deps, "dep-named"), "named dependency was not listed")
+    assert(contains(deps, "../dep-source-only"), "source-only dependency was not listed by source")
 
     null
   }
@@ -198,14 +252,96 @@ type E2e {
     assertContains(addedConfig, "\"name\": \"dep-new\"", "adding a local dependency did not discover its module name")
     assertContains(addedConfig, "\"source\": \"../dep-new\"", "adding a local dependency did not keep its relative source")
 
+    let named = deps.add(ws, source: "../dep-new", name: "dep-alias")
+    let namedConfig = named.after.file(depsModulePath + "/dagger.json").contents
+    assertContains(namedConfig, "\"name\": \"dep-alias\"", "adding a named dependency did not keep the requested name")
+    assertContains(namedConfig, "\"source\": \"../dep-new\"", "adding a named dependency did not keep its relative source")
+
     let removed = deps.remove(ws, name: "dep-named")
     let removedConfig = removed.after.file(depsModulePath + "/dagger.json").contents
     assertNotContains(removedConfig, "\"name\": \"dep-named\"", "removing a named dependency left it in dagger.json")
+
+    let sourceRemoved = deps.remove(ws, name: "../dep-source-only")
+    let sourceRemovedConfig = sourceRemoved.after.file(depsModulePath + "/dagger.json").contents
+    assertNotContains(sourceRemovedConfig, "\"source\": \"../dep-source-only\"", "removing by source left the dependency in dagger.json")
+    assertContains(sourceRemovedConfig, "\"name\": \"dep-named\"", "removing by source removed a different dependency")
 
     let updated = deps.update(ws)
     let updatedConfig = updated.after.file(depsModulePath + "/dagger.json").contents
     assertContains(updatedConfig, "\"name\": \"dep-string\"", "updating dependencies did not preserve the string local dependency")
     assertContains(updatedConfig, "\"name\": \"dep-named\"", "updating dependencies did not preserve the named local dependency")
+    assertContains(updatedConfig, "\"name\": \"dep-source-only\"", "updating dependencies did not name the source-only local dependency")
+
+    null
+  }
+
+  """
+  Dependency update should fail clearly when local dependency metadata is missing
+  or malformed.
+  """
+  pub dependencyConfigFailureCheck(ws: Workspace!): Void @check {
+    let appWithMissing = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": [\"../missing\"]\n}\n"
+    let missing = failedSyntheticConfig(ws, appWithMissing, directory, "app")
+    assertContains(missing.stderr, "local dependency has no dagger.json in workspace: missing", "missing local dependency error was unclear")
+
+    let appWithNoName = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": [\"../no-name\"]\n}\n"
+    let noNameConfigs = directory.withNewFile("no-name/dagger.json", "{\n  \"engineVersion\": \"latest\"\n}\n")
+    let noName = failedSyntheticConfig(ws, appWithNoName, noNameConfigs, "app")
+    assertContains(noName.stderr, "local dependency no-name has no name in dagger.json", "unnamed local dependency error was unclear")
+
+    let appWithAbsolute = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": [\"/dep\"]\n}\n"
+    let absolute = failedSyntheticConfig(ws, appWithAbsolute, directory, "app")
+    assertContains(absolute.stderr, "absolute local dependency source is not supported: /dep", "absolute local dependency error was unclear")
+
+    let appWithMalformedDeps = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": {}\n}\n"
+    let malformed = failedSyntheticConfig(ws, appWithMalformedDeps, directory, "app")
+    assertContains(malformed.stderr, "dagger.json dependencies must be an array", "malformed dependencies error was unclear")
+
+    let badResponse = moduleConfigHelper(ws)
+      .withFile("/dagger.json", fileWithContents("{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\"\n}\n"))
+      .withFile("/response.json", fileWithContents("{\"data\":{}}\n"))
+      .withExec(
+        ["python3", "/module-config.py", "replace-dependencies", "--response", "/response.json", "--source-root", "/mock/app"],
+        expect: ReturnType.FAILURE,
+      )
+    assertContains(badResponse.stderr, "query response did not include updated dependencies", "malformed query response error was unclear")
+
+    null
+  }
+
+  """
+  Targeted local dependency update should still fail with the core API error the
+  helper is designed around.
+  """
+  pub targetedLocalUpdateFailureCheck(ws: Workspace!): Void @check {
+    let mock = directory
+      .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile(
+        "app/dagger.json",
+        "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"sdk\": {\"source\": \"go\"},\n  \"dependencies\": [{\"name\": \"dep-named\", \"source\": \"../dep-named\"}]\n}\n",
+      )
+      .withNewFile(
+        "dep-named/dagger.json",
+        "{\n  \"name\": \"dep-named\",\n  \"engineVersion\": \"latest\"\n}\n",
+      )
+
+    let failed = daggerQueryHelper(ws)
+      .withFile(
+        "/query.graphql",
+        ws
+          .directory("/", include: ["queries/module-source/updated-dependencies.graphql"])
+          .file("queries/module-source/updated-dependencies.graphql"),
+      )
+      .withEnvVariable("DAGGER_TRACE_URL", cloud.traceURL)
+      .withEnvVariable("DAGGER_QUERY_VARS_JSON", toJSON({{ source: "/mock/app", updates: ["dep-named"] }}))
+      .withDirectory("/mock", mock)
+      .withExec(
+        ["dagger-query", "--query", "/query.graphql", "--out", "/response.json"],
+        experimentalPrivilegedNesting: true,
+        expect: ReturnType.FAILURE,
+      )
+
+    assertContains(failed.stderr, "updating local dependencies is not supported", "targeted local update error changed")
 
     null
   }

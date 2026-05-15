@@ -9,6 +9,9 @@
     {
       "name": "dep-named",
       "source": "../dep-named"
+    },
+    {
+      "source": "../dep-source-only"
     }
   ]
 }

@@ -44,8 +44,8 @@ type ModuleConfig {
   """
   Return dagger.json after updating one dependency, or all remote dependencies.
 
-  This uses a tiny synthetic module tree because the Dagger update API currently
-  requires a local module source.
+  This uses a dagger.json-only mock workspace because the Dagger update API
+  currently requires a local module source.
   """
   pub withUpdatedDependencies(ws: Workspace!, modulePath: String!, name: String! = ""): File! {
     let updates = if (name == "") { [] } else { [name] }
@@ -57,18 +57,15 @@ type ModuleConfig {
           updates: updates,
         }}),
         mockRoot,
-        syntheticDirectory(ws, modulePath),
+        mockConfigDirectory(ws, modulePath),
       )
+    let updatedRemote = updatedRemoteDependencyFragments(query.outputContainer.file("/response.json").asJSON)
 
-    baseHelper
-      .withFile("/response.json", query.outputContainer.file("/response.json"))
-      .withExec([
-        "python3", "/module-config.py",
-        "replace-dependencies",
-        "--response", "/response.json",
-        "--source-root", mockSource(modulePath),
-      ])
-      .file("/out/dagger.json")
+    if (updatedRemote.length == 0) {
+      file
+    } else {
+      withDependencyFragments(localDependencyFragments + updatedRemote)
+    }
   }
 
   """
@@ -91,6 +88,13 @@ type ModuleConfig {
     } else {
       []
     }
+  }
+
+  """
+  Return local dependency entries exactly as they appeared in dagger.json.
+  """
+  let localDependencyFragments: [String!]! {
+    dependencyFragments.filter { dependency => isLocalDependency(dependency) }
   }
 
   """
@@ -124,6 +128,32 @@ type ModuleConfig {
   }
 
   """
+  Return the dependency pin, if one is configured.
+  """
+  let dependencyPin(dependency: String!): String! {
+    let value = json().withContents(dependency :: JSON!)
+    if (isJSONString(dependency)) {
+      ""
+    } else if (value.fields.contains("pin") == true) {
+      value.field(["pin"]).asString
+    } else {
+      ""
+    }
+  }
+
+  """
+  Return true when a dependency source is a local path or bare local name.
+  """
+  let isLocalDependency(dependency: String!): Boolean! {
+    let source = dependencySource(dependency)
+    source != "" and dependencyPin(dependency) == "" and (
+      source.trimPrefix("/") != source
+        or source.trimPrefix(".") != source
+        or source.contains(".") == false
+    )
+  }
+
+  """
   Return true when a JSON fragment is a string value.
   """
   let isJSONString(value: String!): Boolean! {
@@ -153,13 +183,49 @@ type ModuleConfig {
   }
 
   """
-  Return a minimal local module tree for dependency update.
+  Return updated remote dependencies from a core dependency update response.
   """
-  let syntheticDirectory(ws: Workspace!, modulePath: String!): Directory! {
-    baseHelper
-      .withDirectory("/workspace-configs", ws.directory("/", include: ["**/dagger.json"]))
-      .withExec(["python3", "/module-config.py", "synthetic", "--module-path", modulePath])
-      .directory(mockRoot)
+  let updatedRemoteDependencyFragments(response: JSONValue!): [String!]! {
+    response
+      .field(["data", "moduleSource", "withUpdateDependencies", "dependencies"])
+      .asArray
+      .{contents}
+      .map { dependency => updatedRemoteDependencyFragment(toString(dependency.contents)) }
+      .filter { dependency => dependency != "" }
+  }
+
+  """
+  Return a dependency object for an updated remote dependency.
+  """
+  let updatedRemoteDependencyFragment(dependency: String!): String! {
+    let value = json().withContents(dependency :: JSON!)
+    let kind = value.field(["kind"]).asString
+
+    if (kind == "LOCAL_SOURCE") {
+      ""
+    } else if (kind == "GIT_SOURCE") {
+      let name = value.field(["moduleName"]).asString
+      let source = value.field(["asString"]).asString
+      let pin = value.field(["pin"]).asString
+
+      if (pin == "") {
+        toString(toJSON({{ name: name, source: source }}))
+      } else {
+        toString(toJSON({{ name: name, source: source, pin: pin }}))
+      }
+    } else {
+      raise "unsupported dependency kind in query response: " + kind
+    }
+  }
+
+  """
+  Return a dagger.json-only workspace tree for dependency update.
+  """
+  let mockConfigDirectory(ws: Workspace!, modulePath: String!): Directory! {
+    ws
+      .directory("/", include: ["**/dagger.json"])
+      .withFile(configPath(modulePath), file)
+      .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
 
   """
@@ -170,12 +236,9 @@ type ModuleConfig {
   }
 
   """
-  Return the Python helper container used only by dependency update.
+  Return this module's dagger.json path from the workspace root.
   """
-  let baseHelper: Container! {
-    container
-      .from("python:3.13-alpine")
-      .withFile("/dagger.json", file)
-      .withFile("/module-config.py", currentModule.source.file("helpers/module-config/module-config.py"))
+  let configPath(modulePath: String!): String! {
+    if (modulePath == ".") { "dagger.json" } else { modulePath + "/dagger.json" }
   }
 }

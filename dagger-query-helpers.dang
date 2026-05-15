@@ -96,18 +96,4 @@ type DaggerQueryHelpers {
     )
   }
 
-  """
-  Return workspace include patterns after replacing one dagger.json file.
-  """
-  let moduleSourceIncludeWithConfig(ws: Workspace!, path: String!, configPath: String!, config: File!): [String!]! {
-    container
-      .from("python:3.13-alpine")
-      .withDirectory("/dagger-configs", ws.directory("/", include: ["**/dagger.json"]))
-      .withFile("/dagger-configs/" + configPath, config)
-      .withFile("/includes.py", currentModule.source.file("helpers/module-source/includes.py"))
-      .withExec(["python3", "/includes.py", path])
-      .stdout
-      .split("\n")
-      .filter { path => path != "" }
-  }
 }

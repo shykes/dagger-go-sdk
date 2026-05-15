@@ -15,8 +15,7 @@ SDK policy lives.
   a tiny synthetic `.git/HEAD` marker inside `/mock` only to give core a local
   context boundary.
 - Do not add operation-specific nested Dagger helpers for generation or
-  dependency mutation. The only remaining JSON transform helper is the
-  update-specific `helpers/module-config`.
+  dependency mutation.
 
 ## Bugs Being Worked Around
 
@@ -70,9 +69,9 @@ API bug to fix, not a helper behavior to preserve.
 
 Dependency update is the exception: core's `withUpdateDependencies` still needs
 `LOCAL_SOURCE` so it can skip existing local dependencies and update remote
-dependencies. The workaround builds a tiny synthetic local tree containing only
-`dagger.json` files and runs the update query against that. It does not mount
-the caller workspace.
+dependencies. The workaround builds a dagger.json-only mock workspace, overlays
+the edited module config, adds a synthetic `.git/HEAD`, and runs the update
+query against that. It does not copy source files.
 
 ### Dang JSON Edits Need Two Workarounds
 
@@ -125,15 +124,10 @@ json()
   .map { value => toString(value.contents) }
 ```
 
-That is enough for dependency list/add/remove. Those edits now live in Dang and
-are built from raw JSON fragments. Dependency update is still the hard case
-because it needs POSIX path normalization and relative-path conversion for local
-dependencies.
-
-So dependency update still uses a tiny config-file transform. This is a plain
-file transform, not a nested Dagger client. If Dang grows convenient path
-operations, move the remaining update logic into `ModuleConfig` and delete the
-transform helper.
+That is enough for dependency list/add/remove. Those edits live in Dang and are
+built from raw JSON fragments. Dependency update also merges the query response
+in Dang. Local dependencies are preserved from the original `dagger.json`; only
+remote dependencies returned by core are rewritten.
 
 ## Helper Shape
 
@@ -152,7 +146,7 @@ Behavior:
 1. Load `Workspace` from `WORKSPACE_ID`.
 2. Resolve `REF` against `--cwd` or `Workspace.path`.
 3. If the resolved path exists in the workspace, compute include patterns from
-   `dagger.json` files and local dependencies, then call
+   `dagger.json` files, declared `include` entries, and local dependencies, then call
    `Workspace.directory(...).asModuleSource(sourceRootPath: ...)`.
 4. If the path does not exist and `--local` was set, fail.
 5. Otherwise call core `moduleSource(ref, disableFindUp: true)`.
@@ -202,38 +196,6 @@ Behavior:
 
 The helper is generic. It does not know about Go SDK generation, dependencies,
 or changesets.
-
-### `helpers/module-config`
-
-CLI:
-
-```sh
-module-config.py synthetic --module-path PATH
-module-config.py replace-dependencies --response RESPONSE --source-root SOURCE_ROOT
-```
-
-Input: `/dagger.json`.
-
-Output:
-
-- `synthetic` writes a minimal local module tree to `/mock`.
-- `replace-dependencies` reads the dependency metadata from a query response and
-  writes `/out/dagger.json`.
-
-This helper only supports dependency update. It does not open a Dagger client,
-load module sources, generate code, or compute changesets.
-
-The synthetic tree is intentionally tiny:
-
-```text
-/mock/.git/HEAD
-/mock/<module>/dagger.json
-/mock/<local-dep>/dagger.json
-```
-
-The `.git/HEAD` file is only a context boundary for core's local
-`ModuleSource` loader. It is not a workspace mount and does not copy source
-files.
 
 ## Dang Wrapper
 
@@ -342,8 +304,8 @@ query UpdatedDependencies($source: String!, $updates: [String!]!) {
 ```
 
 The update query does not call `generatedContextDirectory`. It asks core to
-resolve the updated dependency set, then `helpers/module-config` writes that
-dependency list back into the original `dagger.json`.
+resolve the updated dependency set, then `ModuleConfig` writes remote dependency
+updates back into the original `dagger.json`.
 
 ## Current Flow
 
@@ -365,31 +327,29 @@ Init with generation:
 Dependency add:
 
 1. Edit `dagger.json` in Dang through `ModuleConfig`.
-2. Compute workspace include patterns from the edited config.
-3. Build a directory-backed `ModuleSourceID` from the edited workspace view.
-4. Run the generated-context query.
-5. Compare `/after` to the original workspace directory so the config edit and
-   generated files are both included.
+2. Return a changeset containing only the edited `dagger.json`.
 
 Dependency remove:
 
 1. Edit `dagger.json` in Dang through `ModuleConfig`.
-2. Compute workspace include patterns from the edited config.
-3. Build a directory-backed `ModuleSourceID` from the edited workspace view.
-4. Run the generated-context query.
-5. Compare `/after` to the original workspace directory.
+2. Return a changeset containing only the edited `dagger.json`.
 
 Dependency update:
 
-1. Build a minimal synthetic local tree containing only `dagger.json` files.
-2. Add `/mock/.git/HEAD` so core treats `/mock` as the local context root.
+1. Build a dagger.json-only mock workspace.
+2. Overlay the edited module config and add `/mock/.git/HEAD` so core treats
+   `/mock` as the local context root.
 3. Run the update query against `/mock/<module>` as a `LOCAL_SOURCE`.
-4. Merge the returned dependency metadata into the original `dagger.json`.
-5. Use the same generated-context changeset flow as add/remove.
+4. Merge returned remote dependency metadata into the original `dagger.json`;
+   preserve local dependency entries exactly as written.
+5. Return a changeset containing only the edited `dagger.json`.
 
 Update-all skips local dependencies, matching core behavior. Updating a named
 local dependency still fails with core's "updating local dependencies is not
 supported" error.
+
+Dependency edits deliberately do not run codegen. Users call `generate` when
+they want generated SDK files refreshed.
 
 ## Deleted
 
@@ -411,9 +371,8 @@ follow-up calls natively.
 When module-side `moduleSource(...)` and `Directory.asModuleSource(...)` preserve
 caller context correctly, delete the source-ID helpers too.
 
-When Dang can comfortably handle the remaining path logic, consider deleting
-`helpers/module-config` and moving dependency update fully into Dang.
-If core dependency mutation APIs are fixed first, prefer those APIs instead.
+If core dependency mutation APIs are fixed first, prefer those APIs instead of
+the mock-workspace update workaround.
 
 ## Verification
 
@@ -424,7 +383,6 @@ cd helpers/module-source && go test ./...
 cd helpers/directory-as-module-source && go test ./...
 cd helpers/dagger-query && go test ./...
 cd helpers/render-template && go test ./...
-python3 -m py_compile helpers/module-config/module-config.py
 ```
 
 Function surface:

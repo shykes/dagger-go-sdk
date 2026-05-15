@@ -184,19 +184,28 @@ func workspaceModuleSourceInclude(
 		configPaths = append(configPaths, "dagger.json")
 	}
 
-	configs := map[string][]string{}
+	configs := map[string]sourceConfig{}
 	for _, configPath := range configPaths {
 		contents, err := configDir.File(configPath).Contents(ctx)
 		if err != nil {
 			return nil, err
 		}
-		deps, err := dependencySources(contents)
+		config, err := parseSourceConfig(contents)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", configPath, err)
 		}
-		configs[configPath] = deps
+		configs[configPath] = config
 	}
 
+	return moduleSourceIncludeFromConfigs(configs, modulePath)
+}
+
+type sourceConfig struct {
+	dependencies []string
+	include      []string
+}
+
+func moduleSourceIncludeFromConfigs(configs map[string]sourceConfig, modulePath string) ([]string, error) {
 	include := map[string]struct{}{}
 	seen := map[string]struct{}{}
 	var visit func(string) error
@@ -211,7 +220,7 @@ func workspaceModuleSourceInclude(
 		seen[p] = struct{}{}
 
 		configPath := daggerJSONPath(p)
-		deps, ok := configs[configPath]
+		config, ok := configs[configPath]
 		if !ok {
 			return nil
 		}
@@ -226,7 +235,15 @@ func workspaceModuleSourceInclude(
 			include[path.Join(p, "**")] = struct{}{}
 		}
 
-		for _, dep := range deps {
+		for _, includePath := range config.include {
+			resolved, err := workspacePath(p, includePath)
+			if err != nil {
+				return err
+			}
+			include[resolved] = struct{}{}
+		}
+
+		for _, dep := range config.dependencies {
 			if mustBeLocalRef(dep) {
 				depPath, err := workspacePath(p, dep)
 				if err != nil {
@@ -251,19 +268,20 @@ func workspaceModuleSourceInclude(
 	return ordered, nil
 }
 
-func dependencySources(contents string) ([]string, error) {
+func parseSourceConfig(contents string) (sourceConfig, error) {
 	var config struct {
 		Dependencies []json.RawMessage `json:"dependencies"`
+		Include      []json.RawMessage `json:"include"`
 	}
 	if err := json.Unmarshal([]byte(contents), &config); err != nil {
-		return nil, err
+		return sourceConfig{}, err
 	}
 
-	var deps []string
+	var parsed sourceConfig
 	for _, raw := range config.Dependencies {
 		var source string
 		if err := json.Unmarshal(raw, &source); err == nil {
-			deps = append(deps, source)
+			parsed.dependencies = append(parsed.dependencies, source)
 			continue
 		}
 
@@ -271,13 +289,19 @@ func dependencySources(contents string) ([]string, error) {
 			Source string `json:"source"`
 		}
 		if err := json.Unmarshal(raw, &object); err != nil {
-			return nil, err
+			return sourceConfig{}, err
 		}
 		if object.Source != "" {
-			deps = append(deps, object.Source)
+			parsed.dependencies = append(parsed.dependencies, object.Source)
 		}
 	}
-	return deps, nil
+	for _, raw := range config.Include {
+		var includePath string
+		if err := json.Unmarshal(raw, &includePath); err == nil && includePath != "" {
+			parsed.include = append(parsed.include, includePath)
+		}
+	}
+	return parsed, nil
 }
 
 func daggerJSONPath(modulePath string) string {

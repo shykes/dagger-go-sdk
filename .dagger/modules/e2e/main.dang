@@ -53,37 +53,13 @@ type E2e {
   }
 
   """
-  Return a temporary file with the given contents.
+  Assert that a dependency edit modified only dagger.json.
   """
-  let fileWithContents(contents: String!): File! {
-    directory.withNewFile("value", contents).file("value")
-  }
-
-  """
-  Return the dependency config helper used by the Go SDK module.
-  """
-  let moduleConfigHelper(ws: Workspace!): Container! {
-    container
-      .from("python:3.13-alpine")
-      .withFile(
-        "/module-config.py",
-        ws
-          .directory("/", include: ["helpers/module-config/module-config.py"])
-          .file("helpers/module-config/module-config.py"),
-      )
-  }
-
-  """
-  Run the dependency config helper and expect synthetic tree creation to fail.
-  """
-  let failedSyntheticConfig(ws: Workspace!, config: String!, configs: Directory!, modulePath: String!): Container! {
-    moduleConfigHelper(ws)
-      .withFile("/dagger.json", fileWithContents(config))
-      .withDirectory("/workspace-configs", configs)
-      .withExec(
-        ["python3", "/module-config.py", "synthetic", "--module-path", modulePath],
-        expect: ReturnType.FAILURE,
-      )
+  let assertOnlyConfigChanged(changes: Changeset!, path: String!): Void {
+    assert(contains(changes.modifiedPaths, path), "dependency edit did not modify dagger.json")
+    assert(changes.modifiedPaths.length == 1, "dependency edit modified more than dagger.json")
+    assert(changes.addedPaths.length == 0, "dependency edit should not add generated files")
+    assert(changes.removedPaths.length == 0, "dependency edit should not remove generated files")
   }
 
   """
@@ -241,70 +217,37 @@ type E2e {
   }
 
   """
-  Dependency edits should update dagger.json and then regenerate from the
-  edited config.
+  Dependency edits should update only dagger.json. Users run generate
+  separately when they want generated SDK files refreshed.
   """
   pub dependencyEditCheck(ws: Workspace!): Void @check {
     let deps = goSdk.mod(ws, path: depsModulePath).deps
 
     let added = deps.add(ws, source: "../dep-new")
+    assertOnlyConfigChanged(added, depsModulePath + "/dagger.json")
     let addedConfig = added.after.file(depsModulePath + "/dagger.json").contents
-    assertContains(addedConfig, "\"name\": \"dep-new\"", "adding a local dependency did not discover its module name")
-    assertContains(addedConfig, "\"source\": \"../dep-new\"", "adding a local dependency did not keep its relative source")
+    assertContains(addedConfig, "\"../dep-new\"", "adding an unnamed dependency did not keep its source")
+    assertNotContains(addedConfig, "\"name\": \"dep-new\"", "adding an unnamed dependency should not load the module to discover its name")
 
     let named = deps.add(ws, source: "../dep-new", name: "dep-alias")
+    assertOnlyConfigChanged(named, depsModulePath + "/dagger.json")
     let namedConfig = named.after.file(depsModulePath + "/dagger.json").contents
     assertContains(namedConfig, "\"name\": \"dep-alias\"", "adding a named dependency did not keep the requested name")
     assertContains(namedConfig, "\"source\": \"../dep-new\"", "adding a named dependency did not keep its relative source")
 
     let removed = deps.remove(ws, name: "dep-named")
+    assertOnlyConfigChanged(removed, depsModulePath + "/dagger.json")
     let removedConfig = removed.after.file(depsModulePath + "/dagger.json").contents
     assertNotContains(removedConfig, "\"name\": \"dep-named\"", "removing a named dependency left it in dagger.json")
 
     let sourceRemoved = deps.remove(ws, name: "../dep-source-only")
+    assertOnlyConfigChanged(sourceRemoved, depsModulePath + "/dagger.json")
     let sourceRemovedConfig = sourceRemoved.after.file(depsModulePath + "/dagger.json").contents
     assertNotContains(sourceRemovedConfig, "\"source\": \"../dep-source-only\"", "removing by source left the dependency in dagger.json")
     assertContains(sourceRemovedConfig, "\"name\": \"dep-named\"", "removing by source removed a different dependency")
 
     let updated = deps.update(ws)
-    let updatedConfig = updated.after.file(depsModulePath + "/dagger.json").contents
-    assertContains(updatedConfig, "\"name\": \"dep-string\"", "updating dependencies did not preserve the string local dependency")
-    assertContains(updatedConfig, "\"name\": \"dep-named\"", "updating dependencies did not preserve the named local dependency")
-    assertContains(updatedConfig, "\"name\": \"dep-source-only\"", "updating dependencies did not name the source-only local dependency")
-
-    null
-  }
-
-  """
-  Dependency update should fail clearly when local dependency metadata is missing
-  or malformed.
-  """
-  pub dependencyConfigFailureCheck(ws: Workspace!): Void @check {
-    let appWithMissing = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": [\"../missing\"]\n}\n"
-    let missing = failedSyntheticConfig(ws, appWithMissing, directory, "app")
-    assertContains(missing.stderr, "local dependency has no dagger.json in workspace: missing", "missing local dependency error was unclear")
-
-    let appWithNoName = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": [\"../no-name\"]\n}\n"
-    let noNameConfigs = directory.withNewFile("no-name/dagger.json", "{\n  \"engineVersion\": \"latest\"\n}\n")
-    let noName = failedSyntheticConfig(ws, appWithNoName, noNameConfigs, "app")
-    assertContains(noName.stderr, "local dependency no-name has no name in dagger.json", "unnamed local dependency error was unclear")
-
-    let appWithAbsolute = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": [\"/dep\"]\n}\n"
-    let absolute = failedSyntheticConfig(ws, appWithAbsolute, directory, "app")
-    assertContains(absolute.stderr, "absolute local dependency source is not supported: /dep", "absolute local dependency error was unclear")
-
-    let appWithMalformedDeps = "{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\",\n  \"dependencies\": {}\n}\n"
-    let malformed = failedSyntheticConfig(ws, appWithMalformedDeps, directory, "app")
-    assertContains(malformed.stderr, "dagger.json dependencies must be an array", "malformed dependencies error was unclear")
-
-    let badResponse = moduleConfigHelper(ws)
-      .withFile("/dagger.json", fileWithContents("{\n  \"name\": \"app\",\n  \"engineVersion\": \"latest\"\n}\n"))
-      .withFile("/response.json", fileWithContents("{\"data\":{}}\n"))
-      .withExec(
-        ["python3", "/module-config.py", "replace-dependencies", "--response", "/response.json", "--source-root", "/mock/app"],
-        expect: ReturnType.FAILURE,
-      )
-    assertContains(badResponse.stderr, "query response did not include updated dependencies", "malformed query response error was unclear")
+    assert(updated.isEmpty, "updating only local dependencies should not edit dagger.json")
 
     null
   }

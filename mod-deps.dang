@@ -25,54 +25,51 @@ type ModDeps {
   }
 
   """
-  Add a Dagger dependency and regenerate this module.
+  Add a Dagger dependency to dagger.json.
   """
   pub add(ws: Workspace!, source: String!, name: String! = ""): Changeset! {
-    changesetWithConfig(ws, ModuleConfig(file: daggerJSON).withDependency(source, name))
+    changesetWithConfig(ModuleConfig(file: daggerJSON).withDependency(source, name))
   }
 
   """
-  Remove a Dagger dependency by name or source and regenerate this module.
+  Remove a Dagger dependency from dagger.json by name or source.
   """
   pub remove(ws: Workspace!, name: String!): Changeset! {
-    changesetWithConfig(ws, ModuleConfig(file: daggerJSON).withoutDependency(name))
+    changesetWithConfig(ModuleConfig(file: daggerJSON).withoutDependency(name))
   }
 
   """
-  Update one dependency by name or source, or update all remote dependencies.
+  Update one dependency by name or source, or update all remote dependencies in
+  dagger.json.
   """
   pub update(ws: Workspace!, name: String! = ""): Changeset! {
-    changesetWithConfig(ws, ModuleConfig(file: daggerJSON).withUpdatedDependencies(ws, path, name))
+    changesetWithConfig(ModuleConfig(file: daggerJSON).withUpdatedDependencies(ws, path, name))
   }
 
   """
-  Regenerate the module after replacing its dagger.json file.
+  Return a changeset containing only the edited dagger.json file.
   """
-  let changesetWithConfig(ws: Workspace!, config: File!): Changeset! {
-    let include = DaggerQueryHelpers().moduleSourceIncludeWithConfig(ws, path, configPath, config)
-    let sourceDirectory = ws.directory("/", include: include).withFile(configPath, config)
-    let sourceID = DaggerQueryHelpers().directoryAsModuleSourceID(sourceDirectory, path)
-    let query = DaggerQueryHelpers().moduleSourceChangeset(sourceID, workspacePath)
+  let changesetWithConfig(config: File!): Changeset! {
+    let before = directory.withFile(changesetPath, daggerJSON)
+    let after = directory.withFile(changesetPath, config)
 
-    query.outputDir("/after").changes(workspaceDirectory(ws, include))
+    after.changes(before)
   }
 
   """
-  Return the workspace files used as the before side of the changeset.
+  Return this module's dagger.json path from the changeset root.
   """
-  let workspaceDirectory(ws: Workspace!, include: [String!]!): Directory! {
-    let root = ws.directory("/", include: include)
+  let changesetPath: String! {
+    let configPath = if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
     if (workspacePath == ".") {
-      root
+      configPath
     } else {
-      root.directory(workspacePath)
+      let relative = configPath.trimPrefix(workspacePath + "/")
+      if (relative == configPath) {
+        raise "module path " + path + " is outside changeset root " + workspacePath
+      } else {
+        relative
+      }
     }
-  }
-
-  """
-  Return this module's dagger.json path from the workspace root.
-  """
-  let configPath: String! {
-    if (path == ".") { "dagger.json" } else { path + "/dagger.json" }
   }
 }

@@ -1,7 +1,20 @@
 """
-End-to-end checks for the Go SDK toolchain module.
+End-to-end checks for the Go SDK helper module.
 """
 type E2e {
+  let fixtureRoot: String! = ".dagger/modules/e2e/fixtures"
+  let outputRoot: String! = ".dagger/modules/e2e/out"
+
+  let lookupModulePath: String! = fixtureRoot + "/lookup/app"
+  let lookupNestedPath: String! = lookupModulePath + "/nested"
+  let nonGoModulePath: String! = fixtureRoot + "/lookup/not-go"
+  let skipModulePath: String! = fixtureRoot + "/skip/app"
+  let generateModulePath: String! = fixtureRoot + "/generate/app"
+  let depsModulePath: String! = fixtureRoot + "/deps/app"
+
+  """
+  Fail the current check when a condition is false.
+  """
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) {
       raise message
@@ -9,39 +22,190 @@ type E2e {
     null
   }
 
-  let containsPath(paths: [String!]!, want: String!): Boolean! {
-    paths
-      .filter { path => path == want }
+  """
+  Return true when a list contains the exact string.
+  """
+  let contains(values: [String!]!, want: String!): Boolean! {
+    values
+      .filter { value => value == want }
       .length > 0
   }
 
   """
-  Initializing a Go SDK module at an explicit path should work when the target
-  directory does not exist yet.
+  Assert that a changeset added a path.
   """
-  pub initPathCheck(ws: Workspace!): Void @check {
-    let changes = goSdk.init(ws, name: "testsdk", path: "./foo")
+  let assertAdded(changes: Changeset!, path: String!): Void {
+    assert(contains(changes.addedPaths, path), "expected added path: " + path)
+  }
 
-    assert(
-      containsPath(changes.addedPaths, "foo/dagger.json"),
-      "init changeset did not include foo/dagger.json",
-    )
-    assert(
-      containsPath(changes.addedPaths, "foo/main.go"),
-      "init changeset did not include foo/main.go",
-    )
-    assert(
-      changes.modifiedPaths.length == 0,
-      "init changeset unexpectedly modified existing files",
-    )
-    assert(
-      changes.removedPaths.length == 0,
-      "init changeset unexpectedly removed files",
-    )
-    assert(
-      changes.layer.file("foo/dagger.json").contents.contains("\"name\": \"testsdk\""),
-      "generated dagger.json did not contain module name",
-    )
+  """
+  Assert that a string contains a substring.
+  """
+  let assertContains(value: String!, want: String!, message: String!): Void {
+    assert(value.contains(want), message)
+  }
+
+  """
+  Assert that a string does not contain a substring.
+  """
+  let assertNotContains(value: String!, want: String!, message: String!): Void {
+    assert(value.contains(want) == false, message)
+  }
+
+  """
+  The helper should expose the generate skip marker used by callers.
+  """
+  pub skipGenerateFilenameCheck: Void @check {
+    assert(goSdk.skipGenerateFilename == ".dagger-go-sdk-skip-generate", "skip marker filename changed")
+
+    null
+  }
+
+  """
+  Mod lookup should find the owning Go SDK module when called from a nested path.
+  """
+  pub moduleLookupCheck(ws: Workspace!): Void @check {
+    let nested = goSdk.mod(ws, path: lookupNestedPath)
+    let exact = goSdk.mod(ws, path: lookupModulePath, findUp: false)
+
+    assert(nested.path == lookupModulePath, "find-up lookup returned the wrong module path")
+    assert(exact.path == lookupModulePath, "exact lookup returned the wrong module path")
+
+    null
+  }
+
+  """
+  Init without generation should produce only the seed files and the requested
+  generated-file policy.
+  """
+  pub initWithoutGenerateCheck(ws: Workspace!): Void @check {
+    let defaultPath = outputRoot + "/init-default"
+    let ignoredPath = outputRoot + "/init-ignore-generated"
+    let legacyPath = outputRoot + "/init-legacy"
+
+    let defaultChanges = goSdk.init(ws, name: "init-default", path: defaultPath, generate: false)
+    let ignoredChanges = goSdk.init(ws, name: "init-ignore-generated", path: ignoredPath, generate: false, ignoreGenerated: true)
+    let legacyChanges = goSdk.init(ws, name: "init-legacy", path: legacyPath, template: "legacy", generate: false)
+
+    assertAdded(defaultChanges, defaultPath + "/dagger.json")
+    assertAdded(defaultChanges, defaultPath + "/main.go")
+    assert(defaultChanges.modifiedPaths.length == 0, "init unexpectedly modified existing files")
+    assert(defaultChanges.removedPaths.length == 0, "init unexpectedly removed files")
+    assertContains(defaultChanges.layer.file(defaultPath + "/dagger.json").contents, "\"automaticGitignore\": false", "default init should check in generated files")
+
+    assertContains(ignoredChanges.layer.file(ignoredPath + "/dagger.json").contents, "\"automaticGitignore\": true", "ignoreGenerated init should configure automatic .gitignore output")
+    assertContains(legacyChanges.layer.file(legacyPath + "/main.go").contents, "type InitLegacy struct{}", "legacy template did not render the module type")
+
+    null
+  }
+
+  """
+  Init with generation should exercise the nested query helper and produce a
+  usable generated Go SDK module.
+  """
+  pub initWithGenerateCheck(ws: Workspace!): Void @check {
+    let modulePath = outputRoot + "/init-generated"
+    let changes = goSdk.init(ws, name: "init-generated", path: modulePath)
+
+    assertAdded(changes, modulePath + "/dagger.json")
+    assertAdded(changes, modulePath + "/main.go")
+    assertAdded(changes, modulePath + "/dagger.gen.go")
+    assertAdded(changes, modulePath + "/go.mod")
+    assertContains(changes.layer.file(modulePath + "/dagger.gen.go").contents, "Code generated by dagger.", "generated module did not include dagger.gen.go")
+
+    null
+  }
+
+  """
+  Generating an existing module should produce generated files rooted at that
+  module without touching unrelated paths.
+  """
+  pub generateCheck(ws: Workspace!): Void @check {
+    let changes = goSdk.mod(ws, path: generateModulePath).generate(ws)
+
+    assertAdded(changes, generateModulePath + "/dagger.gen.go")
+    assertAdded(changes, generateModulePath + "/go.mod")
+    assertContains(changes.layer.file(generateModulePath + "/dagger.gen.go").contents, "Code generated by dagger.", "generate did not include dagger.gen.go")
+
+    null
+  }
+
+  """
+  Generating all modules should discover Go SDK modules and ignore skipped ones.
+  """
+  pub generateAllCheck(ws: Workspace!): Void @check {
+    let changes = goSdk.generateAll(ws)
+
+    assertAdded(changes, generateModulePath + "/dagger.gen.go")
+    assert(contains(changes.addedPaths, lookupModulePath + "/dagger.gen.go") == false, "generateAll generated a lookup fixture that should be skipped")
+    assert(contains(changes.addedPaths, depsModulePath + "/dagger.gen.go") == false, "generateAll generated dependency fixtures that should be skipped")
+    assert(contains(changes.addedPaths, skipModulePath + "/dagger.gen.go") == false, "generateAll generated a skipped module")
+    assert(contains(changes.addedPaths, nonGoModulePath + "/dagger.gen.go") == false, "generateAll generated a non-Go SDK module")
+
+    null
+  }
+
+  """
+  A skip marker above a module should make generate return an empty changeset.
+  """
+  pub skipGenerateCheck(ws: Workspace!): Void @check {
+    let mod = goSdk.mod(ws, path: skipModulePath)
+    let changes = mod.generate(ws)
+
+    assert(mod.skipGenerate(ws), "skip marker was not detected")
+    assert(changes.isEmpty, "generate returned changes for a skipped module")
+
+    null
+  }
+
+  """
+  Engine version helpers should read dagger.json and write normalized versions.
+  """
+  pub engineVersionCheck(ws: Workspace!): Void @check {
+    let engine = goSdk.mod(ws, path: lookupModulePath).engine
+    let fixed = engine.require(version: "0.21.0")
+    let latest = engine.requireLatest
+
+    assert(engine.required == "0.20.8", "engine.required should trim a leading v")
+    assertContains(fixed.layer.file(lookupModulePath + "/dagger.json").contents, "\"engineVersion\": \"v0.21.0\"", "engine.require should write a normalized version")
+    assertContains(latest.layer.file(lookupModulePath + "/dagger.json").contents, "\"engineVersion\": \"latest\"", "engine.requireLatest should write latest")
+
+    null
+  }
+
+  """
+  Dependency listing should preserve how users identify dependencies: string
+  entries return their source, named object entries return their name.
+  """
+  pub dependencyListCheck(ws: Workspace!): Void @check {
+    let deps = goSdk.mod(ws, path: depsModulePath).deps.list
+
+    assert(contains(deps, "../dep-string"), "string dependency source was not listed")
+    assert(contains(deps, "dep-named"), "named dependency was not listed")
+
+    null
+  }
+
+  """
+  Dependency edits should update dagger.json and then regenerate from the
+  edited config.
+  """
+  pub dependencyEditCheck(ws: Workspace!): Void @check {
+    let deps = goSdk.mod(ws, path: depsModulePath).deps
+
+    let added = deps.add(ws, source: "../dep-new")
+    let addedConfig = added.after.file(depsModulePath + "/dagger.json").contents
+    assertContains(addedConfig, "\"name\": \"dep-new\"", "adding a local dependency did not discover its module name")
+    assertContains(addedConfig, "\"source\": \"../dep-new\"", "adding a local dependency did not keep its relative source")
+
+    let removed = deps.remove(ws, name: "dep-named")
+    let removedConfig = removed.after.file(depsModulePath + "/dagger.json").contents
+    assertNotContains(removedConfig, "\"name\": \"dep-named\"", "removing a named dependency left it in dagger.json")
+
+    let updated = deps.update(ws)
+    let updatedConfig = updated.after.file(depsModulePath + "/dagger.json").contents
+    assertContains(updatedConfig, "\"name\": \"dep-string\"", "updating dependencies did not preserve the string local dependency")
+    assertContains(updatedConfig, "\"name\": \"dep-named\"", "updating dependencies did not preserve the named local dependency")
 
     null
   }
